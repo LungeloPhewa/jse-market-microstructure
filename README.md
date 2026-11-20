@@ -2,6 +2,8 @@
 
 **A reproducible study of Anglo American (AGLJ.J) and Growthpoint (GRTJ.J) on the Johannesburg Stock Exchange: from raw Refinitiv tick exports to trading-cost measurement and a Hawkes-process model of order flow.**
 
+📊 **Results dashboard:** <https://LungeloPhewa.github.io/jse-market-microstructure/dashboard/>
+
 📖 **Read the book:** <https://LungeloPhewa.github.io/jse-market-microstructure/> · synthetic-data build: [/synthetic/](https://LungeloPhewa.github.io/jse-market-microstructure/synthetic/)
 
 [![build-and-publish](https://github.com/LungeloPhewa/jse-market-microstructure/actions/workflows/publish.yml/badge.svg)](https://github.com/LungeloPhewa/jse-market-microstructure/actions/workflows/publish.yml)

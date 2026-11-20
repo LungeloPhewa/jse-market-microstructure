@@ -10,6 +10,11 @@ book:
   date-format: "D MMMM YYYY"
   repo-url: https://github.com/LungeloPhewa/jse-market-microstructure
   repo-actions: [source, issue]
+  sidebar:
+    tools:
+      - icon: speedometer2
+        href: dashboard/index.html
+        text: Results dashboard
   search: true
   chapters:
     - index.qmd

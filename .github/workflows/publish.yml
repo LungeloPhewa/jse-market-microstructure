@@ -53,6 +53,8 @@ jobs:
           sudo chown -R "$USER" _book _book_synthetic
           mkdir -p _book/synthetic
           cp -r _book_synthetic/. _book/synthetic/
+          mkdir -p _book/dashboard
+          cp -r dashboard/index.html dashboard/assets _book/dashboard/
           touch _book/.nojekyll
 
       - uses: actions/upload-pages-artifact@v3

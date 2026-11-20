@@ -25,3 +25,6 @@ tools/work/
 
 /.quarto/
 docs/linkedin.md
+
+# Local outputs (LinkedIn carousel)
+/out/

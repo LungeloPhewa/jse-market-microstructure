@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JSE Microstructure Results</title>
+<meta name="description" content="Key results of a reproducible market-microstructure study of Anglo American and Growthpoint on the JSE.">
+<style>
+  :root { --ink:#1b2a4a; --muted:#6b7280; --line:#e5e7eb; --bg:#f5f7fb; --card:#ffffff; --a:#2457a7; --g:#e08a1e; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 Inter, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  a { color:var(--a); }
+  header { background:var(--ink); color:#fff; padding:36px 16px 30px; }
+  .wrap { max-width:1120px; margin:0 auto; padding:0 16px; }
+  header .wrap { padding:0; }
+  h1 { margin:0 0 6px; font-size:clamp(24px,4vw,34px); line-height:1.15; letter-spacing:-0.01em; }
+  header p { margin:0; color:#c9d3e6; max-width:760px; }
+  .links { margin-top:18px; display:flex; gap:10px; flex-wrap:wrap; }
+  .btn { display:inline-block; padding:8px 14px; border-radius:8px; background:#fff; color:var(--ink); text-decoration:none; font-weight:600; font-size:14px; }
+  .btn.ghost { background:transparent; color:#fff; border:1px solid #4b5d82; }
+  h2 { font-size:13px; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); margin:34px 0 12px; }
+  .legend { display:flex; gap:18px; font-size:13px; color:var(--muted); margin:-4px 0 12px; flex-wrap:wrap; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:-1px; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:12px; }
+  .kpi { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+  .kpi-t { font-size:13px; font-weight:600; }
+  .kpi-v { display:flex; gap:18px; margin:6px 0 4px; font-size:26px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .kpi-v small { font-size:14px; font-weight:600; }
+  .kpi-v .a { color:var(--a); } .kpi-v .g { color:var(--g); }
+  .kpi-n { font-size:12.5px; color:var(--muted); line-height:1.4; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,460px),1fr)); gap:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .card h3 { margin:0 0 4px; font-size:16px; }
+  .card p { margin:0 0 10px; color:var(--muted); font-size:13.5px; }
+  .card img { width:100%; height:auto; display:block; }
+  .figs { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:12px; }
+  .fig { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:10px; text-decoration:none; color:var(--ink); display:flex; flex-direction:column; gap:6px; }
+  .fig img { width:100%; aspect-ratio:16/10; object-fit:cover; object-position:top; border-radius:6px; border:1px solid var(--line); }
+  .fig span { font-weight:600; font-size:14px; } .fig small { color:var(--muted); }
+  .fig:hover { border-color:var(--a); }
+  footer { color:var(--muted); font-size:13px; padding:30px 16px 40px; }
+  footer p { max-width:860px; }
+</style>
+</head>
+<body>
+<header><div class="wrap">
+  <h1>Market Microstructure of the JSE: key results</h1>
+  <p>Anglo American (AGLJ.J) and Growthpoint (GRTJ.J), 1 September – 1 October 2013: 100,903 trades and 7.6 million top-of-book updates, from raw tick data to trading costs and a Hawkes model of order flow.</p>
+  <div class="links">
+    <a class="btn" href="../index.html">Read the full study</a>
+    <a class="btn ghost" href="../chapters/09-reproducibility.html">How it is reproduced</a>
+  </div>
+</div></header>
+
+<main class="wrap">
+  <h2>Headline numbers</h2>
+  <div class="legend"><span><span class="dot" style="background:var(--a)"></span>Anglo American (AGLJ.J)</span><span><span class="dot" style="background:var(--g)"></span>Growthpoint (GRTJ.J)</span></div>
+  <div class="kpis">
+      <div class="kpi"><div class="kpi-t">Effective spread</div>
+        <div class="kpi-v"><span class="a">5.6 <small>bps</small></span><span class="g">10.8 <small>bps</small></span></div>
+        <div class="kpi-n">average cost of a round trip, relative to the mid-price</div></div>
+      <div class="kpi"><div class="kpi-t">Lost to adverse selection</div>
+        <div class="kpi-v"><span class="a">74%</span><span class="g">55%</span></div>
+        <div class="kpi-n">share of the spread that becomes a permanent price move within 60 s</div></div>
+      <div class="kpi"><div class="kpi-t">Size exponent of impact</div>
+        <div class="kpi-v"><span class="a">0.06</span><span class="g">0.14</span></div>
+        <div class="kpi-n">far below the square-root law's 0.5: large orders are split</div></div>
+      <div class="kpi"><div class="kpi-t">Volatility in the first 10 min</div>
+        <div class="kpi-v"><span class="a">1.7×</span><span class="g">2.7×</span></div>
+        <div class="kpi-n">relative to the average 10-minute bucket of the day</div></div>
+      <div class="kpi"><div class="kpi-t">Order-book events per day</div>
+        <div class="kpi-v"><span class="a">440k</span><span class="g">17k</span></div>
+        <div class="kpi-n">limit orders, cancellations and market orders</div></div>
+      <div class="kpi"><div class="kpi-t">Hawkes spectral radius</div>
+        <div class="kpi-v"><span class="a">0.84</span><span class="g">0.83</span></div>
+        <div class="kpi-n">median day; near 1 means most events are reactions to earlier events</div></div>
+      <div class="kpi"><div class="kpi-t">Refill half-life after a buy</div>
+        <div class="kpi-v"><span class="a">56 <small>ms</small></span><span class="g">54 <small>ms</small></span></div>
+        <div class="kpi-n">time for the excitation of ask-side requoting to halve</div></div>
+      <div class="kpi"><div class="kpi-t">Trade-sign autocorrelation</div>
+        <div class="kpi-v"><span class="a">0.26</span><span class="g">0.31</span></div>
+        <div class="kpi-n">lag 1; order flow is persistent (large orders are split)</div></div>
+  </div>
+
+  <h2>Findings</h2>
+  <div class="cards">
+    <div class="card"><h3>Same one-cent tick, twice the cost</h3>
+      <p>Growthpoint's price is a tenth of Anglo's, so its one-cent tick is ten times larger in relative terms. Its spread is about twice as wide in basis points, and a larger share of it goes to liquidity providers rather than to price impact.</p>
+      <img src="assets/spreads.svg" alt="Effective spread decomposition"></div>
+    <div class="card"><h3>Size matters less than expected</h3>
+      <p>The price impact of a single trade grows very slowly with its size, far below the square-root law (dashed), because large orders are split into small pieces.</p>
+      <img src="assets/size.svg" alt="Price impact against trade size"></div>
+    <div class="card"><h3>When you trade matters: volatility</h3>
+      <p>Mid-price volatility is highest just after the open and falls through the morning.</p>
+      <img src="assets/intraday_volatility.svg" alt="Intraday volatility"></div>
+    <div class="card"><h3>When you trade matters: spreads</h3>
+      <p>Spreads are widest after the open and narrow towards the close.</p>
+      <img src="assets/intraday_spread.svg" alt="Intraday spreads"></div>
+    <div class="card"><h3>Order flow reacts to itself</h3>
+      <p>A ten-variate Hawkes model fitted to every day finds near-critical self-excitation. Market orders are followed within milliseconds by withdrawals and refills at the best quotes.</p>
+      <img src="assets/hawkes.svg" alt="Key Hawkes excitation effects"></div>
+    <div class="card"><h3>Volume builds into the close</h3>
+      <p>Traded volume rises through the afternoon, when liquidity is cheapest to access.</p>
+      <img src="assets/intraday_volume.svg" alt="Intraday volume"></div>
+  </div>
+
+  <h2>Selected figures from the study</h2>
+  <div class="figs">
+      <a class="fig" href="../chapters/06-cost-of-trading.html#fig-spreads">
+        <img loading="lazy" src="../chapters/06-cost-of-trading_files/figure-html/fig-spreads-output-1.png" alt="Effective vs quoted spreads">
+        <span>Effective vs quoted spreads</span><small>The cost of trading</small></a>
+      <a class="fig" href="../chapters/06-cost-of-trading.html#fig-sqrt-law">
+        <img loading="lazy" src="../chapters/06-cost-of-trading_files/figure-html/fig-sqrt-law-output-1.png" alt="Cost decomposition by trade size">
+        <span>Cost decomposition by trade size</span><small>The cost of trading</small></a>
+      <a class="fig" href="../chapters/05-impact-seasonality-resilience.html#fig-season-agl">
+        <img loading="lazy" src="../chapters/05-impact-seasonality-resilience_files/figure-html/fig-season-agl-output-1.png" alt="Intraday seasonality, AGLJ.J">
+        <span>Intraday seasonality, AGLJ.J</span><small>Impact, seasonality, resilience</small></a>
+      <a class="fig" href="../chapters/05-impact-seasonality-resilience.html#fig-resilience">
+        <img loading="lazy" src="../chapters/05-impact-seasonality-resilience_files/figure-html/fig-resilience-output-1.png" alt="Order-book resilience after large trades">
+        <span>Order-book resilience after large trades</span><small>Impact, seasonality, resilience</small></a>
+      <a class="fig" href="../chapters/08-hawkes.html#fig-bubble-agl">
+        <img loading="lazy" src="../chapters/08-hawkes_files/figure-html/fig-bubble-agl-output-1.png" alt="Hawkes excitation bubble plots, AGLJ.J">
+        <span>Hawkes excitation bubble plots, AGLJ.J</span><small>A Hawkes model of order flow</small></a>
+      <a class="fig" href="../chapters/03-order-flow.html#fig-sign-acf">
+        <img loading="lazy" src="../chapters/03-order-flow_files/figure-html/fig-sign-acf-output-1.png" alt="Persistence of trade signs">
+        <span>Persistence of trade signs</span><small>Order flow and trade arrivals</small></a>
+  </div>
+</main>
+
+<footer class="wrap">
+  <p>Source data: Refinitiv (LSEG) Tick History exports, used under an academic licence. Only aggregate results and charts are published. Every number on this page comes from the same reproducible pipeline and results as the study; a version run end to end on synthetic data is at <a href="../synthetic/index.html">/synthetic/</a>.</p>
+  <p>© 2026 Lungelo Phewa · <a href="https://github.com/LungeloPhewa/jse-market-microstructure">Source on GitHub</a></p>
+</footer>
+</body>
+</html>
