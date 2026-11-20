@@ -1,0 +1,27 @@
+# Data: never commit licensed exports or derived files
+data/real/
+data/synthetic/
+*.csv.gz
+*.parquet
+*.pkl
+
+# Build outputs (the real-data results live in _freeze/, which IS committed)
+_book/
+_book_synthetic/
+.quarto/
+**/*.quarto_ipynb
+.snakemake/
+logs/
+
+# Python
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+
+# Scratch
+tools/work/
+.DS_Store
+
+/.quarto/
+docs/linkedin.md

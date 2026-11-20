@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jsemicro"
+version = "1.0.0"
+description = "Market microstructure of two JSE equities from Refinitiv tick data: data engineering, price impact, trading costs and a Hawkes model of order flow."
+authors = [{ name = "Lungelo Phewa" }]
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = [
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "scipy>=1.12",
+    "numba>=0.59",
+    "matplotlib>=3.8",
+    "pyarrow>=15",
+    "statsmodels>=0.14",
+    "tabulate>=0.9",
+    "tzdata",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "snakemake>=8", "jupyter", "nbclient", "ipykernel"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

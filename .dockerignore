@@ -1,0 +1,9 @@
+.git
+data
+_book
+_book_synthetic
+.quarto
+.snakemake
+logs
+tools/work
+**/__pycache__
