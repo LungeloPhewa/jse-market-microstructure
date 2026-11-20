@@ -1,0 +1,190 @@
+# Market phases and order events {#sec-events}
+
+{{< include _part3-setup.qmd >}}
+
+## Introduction
+
+This part models the order flow of Anglo American (AGLJ.J) and Growthpoint Properties (GRTJ.J) on the JSE, over the same September 2013 data as Parts I and II, with a multivariate Hawkes process [@hawkes1971spectra; @bacry2015hawkes]. It follows the reference model of @jericevich2021simulation: ten event types (market orders, aggressive and passive limit orders, aggressive and passive cancellations, each on the bid and ask side), a ten-variate Hawkes process with exponential kernels, calibration by maximum likelihood, validation with generalised residuals [@bowsher2007modelling], and bubble plots of the fitted excitation effects. The bubble plots are the key deliverable: each shows, for one order type, which other order types trigger it, how strongly and how quickly.
+
+The paper calibrates its model to simulated order messages. Here the model is fitted to real trade and quote data, so two steps come first: separating auction and off-book events from continuous trading (the next section), and inferring the ten event types from the trade prints and the ten-level order book (@sec-events-types).
+
+## Step 0: Separating Auction, Uncrossing and Off-Book Events
+
+```{python}
+#| include: false
+mk = clean["markers"]
+ta = clean["trades_all"]
+cls_tab = mp.phase_summary(ta)
+book_tab = clean["book_phases"]
+
+def cls_row(ric, cls, col):
+    r = cls_tab[(cls_tab["ric"] == ric) & (cls_tab["trade_class"] == cls)]
+    return float(r[col].iloc[0]) if len(r) else 0.0
+
+intraday = ta[ta["trade_class"] == "uncross: intraday"].set_index("ric")
+intraday_day = intraday["date"].iloc[0]
+intraday_day_str = f"{intraday_day.day} September {intraday_day.year}"
+intraday_vol = {ric: int(intraday.loc[ric, "volume"]) for ric in RICS}
+intraday_share = {ric: float(intraday.loc[ric, "volume"] /
+                             ta[(ta["ric"] == ric) & (ta["date"] == intraday_day)]["volume"].sum())
+                  for ric in RICS}
+n_days = int(ta["date"].nunique())
+ob_cont = ta[(ta["ric"] == "AGLJ.J") & (ta["trade_class"] == "off-book") & (ta["phase"] == "continuous")]
+ob_cont_n, ob_cont_vol = len(ob_cont), int(ob_cont["volume"].sum())
+```
+
+The first step before any analysis is to separate auction order-book events, quote changes and uncrossing prices from the quote changes and transactions of the continuous trading period. On the JSE a trading day runs through several phases: a pre-open, an opening auction (a call period in which orders accumulate without trading and the book can be crossed), continuous trading, a closing auction and a post-close period in which negotiated off-book trades are reported. Each auction ends with an *uncross*: one price at which the accumulated orders are matched, printed as a large trade at the moment the next phase starts.
+
+Part II approximated the continuous session by clock times (09:10–16:50 SAST). That removed the opening and closing auctions, but not the events that fall inside those hours without belonging to continuous trading. Here every event is classified using the exchange's own market-state markers instead of clock times. The transactions export carries them in the qualifier fields `PRC_QL2`/`PRC_QL3`, as separate update messages sent when a security changes phase:
+
+| Marker (`PRC_QL2`/`PRC_QL3`) | SAST | Phase that starts |
+|---|---|---|
+| REP | 08:00 | pre-open |
+| AUC | 08:30 | opening auction |
+| TRD | about 09:00 | continuous trading (the opening uncross prints first) |
+| AUC / STL | 12:00 on `{python} intraday_day_str` | intraday auction |
+| TRD | about 12:15 on `{python} intraday_day_str` | continuous trading resumes (after the intraday uncross) |
+| AUC / CLA | 16:50 | closing auction |
+| CLS / OSP | about 17:00 | post-close (after the closing uncross); off-book reporting |
+| CLS / ETR, CLS | 18:15, 18:30 | end of trade reporting; closed |
+
+Every trade print and every order-book update is assigned the phase in force at its time stamp. A trade is then classified as an *uncross* if it is the first on-book print at the end of an auction, as *off-book* if it is a negotiated trade reported to the exchange (it leaves the cumulative on-book volume `ACVOL_1` unchanged and increases the off-book volume `OFFBK_VOL`), and as *continuous* if it is an on-book trade during continuous trading.
+
+```{python}
+#| include: false
+t = cls_tab.rename(columns={"ric": "Security", "trade_class": "Class", "trades": "Prints",
+                            "volume": "Volume (shares)", "volume share": "Share of volume"})
+t["Volume (shares)"] = t["Volume (shares)"].map("{:,.0f}".format)
+t["Share of volume"] = t["Share of volume"].map("{:.1%}".format)
+show_table(t)
+```
+
+```{python}
+#| label: tbl-trade-classes
+#| tbl-cap: "All trade prints over the 21 trading days, by class. Only continuous on-book trades are used in the rest of the analysis."
+#| output: asis
+print(LAST_TABLE)
+```
+
+```{python}
+#| include: false
+b = book_tab.pivot(index="phase", columns="ric", values="book updates").fillna(0).astype(int)
+b = b.reindex(["continuous", "opening auction", "intraday auction", "closing auction", "post-close", "closed", "no marker"]).fillna(0).astype(int)
+show_table(b.applymap(lambda x: f"{x:,}") if hasattr(b, "applymap") else b.map(lambda x: f"{x:,}"), index=True)
+```
+
+```{python}
+#| label: tbl-book-phases
+#| tbl-cap: "Order-book (market depth) updates by trading phase. Updates before the first marker of the day (the pre-open) are labelled 'no marker'."
+#| output: asis
+print(LAST_TABLE)
+```
+
+```{python}
+#| label: fig-phases
+#| fig-cap: "Trade prints on the day with the intraday auction, by class. Marker area is proportional to print volume; shaded bands are the auction call periods identified from the exchange's market-state markers."
+#| fig-height: 6.5
+#| results: hide
+fig, axes = plt.subplots(2, 1, figsize=(10, 6.5), layout="constrained")
+styles = {"continuous": ("0.55", "o"), "off-book": ("tab:orange", "s"),
+          "uncross: opening": ("tab:red", "D"), "uncross: intraday": ("tab:red", "D"),
+          "uncross: closing": ("tab:red", "D")}
+for ax, ric in zip(axes, RICS):
+    d = ta[(ta["ric"] == ric) & (ta["date"] == intraday_day)].copy()
+    d["local"] = d["ts"].dt.tz_convert(TZ).dt.tz_localize(None)
+    vmax = d["volume"].max()
+    for c, (col, mkr) in styles.items():
+        s = d[d["trade_class"] == c]
+        if len(s):
+            _ = ax.scatter(s["local"], s["price"], s=5 + 600 * s["volume"] / vmax, color=col, marker=mkr,
+                           alpha=0.6 if c == "continuous" else 0.9, edgecolor="black" if c != "continuous" else "none",
+                           linewidth=0.4, label=c)
+    m = mk[(mk["ric"] == ric) & (mk["date"] == intraday_day)].sort_values("ts")
+    m = m.assign(local=m["ts"].dt.tz_convert(TZ).dt.tz_localize(None))
+    for i in range(len(m) - 1):
+        if "auction" in m["phase"].iloc[i]:
+            _ = ax.axvspan(m["local"].iloc[i], m["local"].iloc[i + 1], color="tab:blue", alpha=0.12)
+    _ = ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    _ = ax.set_xlim(pd.Timestamp(f"{intraday_day} 08:20"), pd.Timestamp(f"{intraday_day} 17:15"))
+    _ = ax.set_title(f"{ric}, {intraday_day}", fontsize=10)
+    _ = ax.set_ylabel("Price (ZAc)")
+    _ = ax.legend(fontsize=7, loc="upper left", markerscale=0.5)
+axes[-1].set_xlabel("Time (SAST)")
+plt.show()
+```
+
+```{python}
+#| include: false
+def cr(ric, cls, col):
+    return f"{100 * cls_row(ric, cls, 'volume share'):.1f}%"
+
+def pct(x):
+    return f"{100 * x:.0f}%"
+```
+
+@tbl-trade-classes shows how much of the recorded volume is not continuous trading. Off-book reports carry `{python} cr("AGLJ.J", "off-book", "volume")` of AGLJ.J's and `{python} cr("GRTJ.J", "off-book", "volume")` of GRTJ.J's volume, and the closing uncross `{python} cr("AGLJ.J", "uncross: closing", "volume")` and `{python} cr("GRTJ.J", "uncross: closing", "volume")`. Most of these fall outside the clock-time session used in Part II, but not all. On `{python} intraday_day_str`, the quarterly index-futures close-out, the JSE ran an intraday auction from 12:00 to 12:15 (@fig-phases). Its uncross was a single print of `{python} f"{intraday_vol['AGLJ.J']:,}"` AGLJ.J shares and `{python} f"{intraday_vol['GRTJ.J']:,}"` GRTJ.J shares, `{python} pct(intraday_share['AGLJ.J'])` and `{python} pct(intraday_share['GRTJ.J'])` of that day's volume, and for 15 minutes orders accumulated in the book without trading (@tbl-book-phases). In AGLJ.J, `{python} ob_cont_n` off-book reports (`{python} f"{ob_cont_vol:,}"` shares) were also printed during continuous hours. With the clock-time filter these events entered the Part II sample as if they were ordinary continuous trades. From here on, only continuous on-book trades and continuous-phase order-book updates are used, and the continuous session runs from the exchange's own start marker (about 09:00) to the closing-auction marker (16:50), with the intraday auction removed.
+
+## Identifying the Ten Order Event Types {#sec-events-types}
+
+```{python}
+#| include: false
+counts_ex = {ric: ar.event_counts(events[ric], EXAMPLE_DAY) for ric in RICS}
+counts_mean = {ric: ar.event_counts(events[ric]) / events[ric]["date"].nunique() for ric in RICS}
+match = {ric: [float(x) for x in diag[ric]["print volume matched to book"]] for ric in RICS}
+total_ex = {ric: int(counts_ex[ric].sum()) for ric in RICS}
+mo_share = {ric: f"{counts_mean[ric][[1, 2]].sum() / counts_mean[ric].sum():.1%}" for ric in RICS}
+```
+
+@jericevich2021simulation use ten event types (@tbl-events). The data contain trade prints and snapshots of the best ten price levels on each side of the book, not the individual order messages, so the events are inferred following their Section 3.1:
+
+* **Market orders (types 1–2).** An aggressive order that walks the book prints once per price level within a few milliseconds, so consecutive continuous on-book prints with the same Lee–Ready sign [@lee1991inferring] no more than 10 ms apart are one market order.
+* **Limit orders (types 3–6).** Consecutive book snapshots are compared price by price on each side. Quantity added at a price is a limit order: *aggressive* if its price is at or better than the best price on its side before the update (it joins or improves the best quote, or the side was empty), *passive* if worse.
+* **Cancellations (types 7–10).** Quantity removed at a price was either executed or cancelled. Removals are first matched to trade prints at that price on that side within half a second of the update (the trade and depth feeds are time-stamped separately); the unmatched remainder is a cancellation, *aggressive* if the level was the best quote, *passive* otherwise.
+* Only prices visible in both snapshots are compared, because a level can enter or leave the ten-level window when prices move without any order being sent. Each changed price level counts as one event.
+
+```{python}
+#| include: false
+show_table(pd.DataFrame({
+    "#": range(1, 11),
+    "Event type": [oe.EVENT_NAMES[k] for k in range(1, 11)],
+    "AGLJ.J, example day": [f"{v:,}" for v in counts_ex["AGLJ.J"]],
+    "AGLJ.J, daily mean": [f"{v:,.0f}" for v in counts_mean["AGLJ.J"]],
+    "GRTJ.J, example day": [f"{v:,}" for v in counts_ex["GRTJ.J"]],
+    "GRTJ.J, daily mean": [f"{v:,.0f}" for v in counts_mean["GRTJ.J"]],
+}))
+```
+
+```{python}
+#| label: tbl-events
+#| tbl-cap: "The ten event types of Jericevich, Chang and Gebbie (2021), with their counts on the example day and the daily average over the 21 trading days."
+#| output: asis
+print(LAST_TABLE)
+```
+
+```{python}
+#| include: false
+def mt(ric, f=np.median):
+    return f"{100 * f(match[ric]):.0f}%"
+
+def ce(ric):
+    return f"{total_ex[ric]:,}"
+```
+
+```{python}
+#| include: false
+# Effect of the time-unit correction: market orders on the example day with the
+# intended 10 ms window and with the 10 s window the uncorrected code used.
+_tr = clean["trades"]
+_ex_tr = _tr[_tr["date"] == EXAMPLE_DAY]
+mo_10ms = {ric: len(oe.market_orders(_ex_tr[_ex_tr["ric"] == ric], gap_ms=10.0)) for ric in RICS}
+mo_10s = {ric: len(oe.market_orders(_ex_tr[_ex_tr["ric"] == ric], gap_ms=10_000.0)) for ric in RICS}
+```
+
+::: {.callout-note}
+## A correction to the original analysis
+The event identification depends on two time windows: 10 ms for grouping prints into market orders and ±500 ms for matching depletions to prints. In the original code both were computed from `Series.astype("int64")` on the assumption that timestamps are stored in nanoseconds. Under pandas 3 they are stored in microseconds, which silently widened the windows a thousandfold, to 10 s and ±500 s. On the example day the intended window finds `{python} f"{mo_10ms['AGLJ.J']:,}"` AGLJ.J market orders where the widened one found `{python} f"{mo_10s['AGLJ.J']:,}"` (GRTJ.J: `{python} f"{mo_10ms['GRTJ.J']:,}"` against `{python} f"{mo_10s['GRTJ.J']:,}"`). The wide matching window also attributed cancellations to trades minutes away. All results in this part use the corrected, unit-safe conversion (`order_events._epoch_ns`), which has a regression test. The error was found by running the pipeline on simulated data with known parameters (@sec-synthetic).
+:::
+
+The identification can be checked against the trades: if it is right, the volume of continuous trade prints should be matched by depletions of the displayed book at the traded prices. The median day matches `{python} mt("AGLJ.J")` of AGLJ.J's and `{python} mt("GRTJ.J")` of GRTJ.J's print volume (lowest day `{python} mt("AGLJ.J", min)` and `{python} mt("GRTJ.J", min)`); the remainder traded against hidden or iceberg liquidity that never appeared in the displayed book.
+
+The two order books are very different (@tbl-events). On the example day AGLJ.J generated `{python} ce("AGLJ.J")` events and GRTJ.J `{python} ce("GRTJ.J")`. In AGLJ.J most events are passive limit orders and passive cancellations away from the best quotes, the signature of algorithms that continually post and withdraw depth; market orders are `{python} mo_share['AGLJ.J']` of its events. GRTJ.J's book is far quieter, and market orders are `{python} mo_share['GRTJ.J']` of its events.

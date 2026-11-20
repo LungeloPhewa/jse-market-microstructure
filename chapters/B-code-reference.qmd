@@ -1,0 +1,28 @@
+# Code reference {#sec-code}
+
+```{python}
+#| include: false
+from jsemicro.reporting import module_summary, package_modules
+```
+
+Every module of the `jsemicro` package is listed below with its purpose and its public functions. The listing is generated from the docstrings at render time, so it always matches the code. Full source is on GitHub, and each function has a docstring that can be read with `help()` in Python.
+
+```{python}
+#| output: asis
+groups = {
+    "jsemicro.ingest": "Ingestion (Part I)", "jsemicro.pipeline": "Pipeline (Part I)",
+    "jsemicro.eda": "Exploratory analysis (Part I)", "jsemicro.microstructure": "Microstructure and trading costs (Part II)",
+    "jsemicro.hawkes": "Hawkes model of order flow (Part III)", "jsemicro.synthetic": "Synthetic market (Appendix A)",
+}
+done = set()
+for prefix, title in groups.items():
+    print(f"\n## {title}\n")
+    for m in package_modules():
+        if m.startswith(prefix + "."):
+            print(module_summary(m) + "\n")
+            done.add(m)
+print("\n## Infrastructure\n")
+for m in package_modules():
+    if m not in done:
+        print(module_summary(m) + "\n")
+```

@@ -1,0 +1,51 @@
+# Preface {.unnumbered}
+
+```{python}
+#| include: false
+from jsemicro.reporting import recall
+R = recall()
+have = all(k in R for k in ("spread_stats", "hawkes_rho", "sign_acf1", "sqrt_law", "tau_alpha"))
+if have:
+    sp = R["spread_stats"]; sq = R["sqrt_law"]; rho = R["hawkes_rho_days"]; eff = R["hawkes_effects"]
+```
+
+{{< include chapters/_synthetic-banner.qmd >}}
+
+This book is a complete, reproducible study of market microstructure from tick data. It follows two shares on the Johannesburg Stock Exchange, **Anglo American (AGLJ.J)** and **Growthpoint Properties (GRTJ.J)**, through one month of every trade and every change of a ten-level order book. It goes from the vendor's raw export files to measured trading costs and a calibrated stochastic model of order flow. It is written for readers in banks and investment firms who work on execution, transaction-cost analysis, market making or liquidity risk, and for anyone who wants to see the full workflow behind such numbers rather than the numbers alone.
+
+## Key findings
+
+::: {.content-visible unless-profile="synthetic"}
+```{python}
+#| output: asis
+if have:
+    print(f"""
+* **Trading costs.** The average effective spread is {sp['AGLJ.J']['effective_bps']:.1f} bps for AGLJ.J and {sp['GRTJ.J']['effective_bps']:.1f} bps for GRTJ.J. About {sp['AGLJ.J']['impact_bps'] / sp['AGLJ.J']['effective_bps']:.0%} of AGLJ.J's spread, but only {sp['GRTJ.J']['impact_bps'] / sp['GRTJ.J']['effective_bps']:.0%} of GRTJ.J's, is lost to adverse selection within a minute (@sec-costs). The larger relative tick of the cheaper share makes it about twice as expensive to trade.
+* **Size matters less than expected.** The indirect cost of a trade rises with its size with an exponent of only {sq['AGLJ.J']['slope']:.2f} (AGLJ.J) and {sq['GRTJ.J']['slope']:.2f} (GRTJ.J), far below the 0.5 of the square-root law for metaorders. Large orders are split, and a single print reveals little (@sec-impact, @sec-costs).
+* **Time of day matters more.** Volatility in the first ten minutes is 1.7 (AGLJ.J) to 2.7 (GRTJ.J) times its daily average and quoted spreads are 1.7–1.9 times wider, while volume builds into the close. A schedule that ignores this overpays at the open (@sec-impact).
+* **Order flow is persistent and self-exciting.** The direction of trading is autocorrelated over more than a hundred trades (lag-1 autocorrelation {R['sign_acf1']['AGLJ.J']:.2f} and {R['sign_acf1']['GRTJ.J']:.2f}), and waiting times have power-law tails (@sec-orderflow). A ten-variate Hawkes model finds both books close to critical: the branching matrix has a median spectral radius of {rho['AGLJ.J'][1]:.2f} for AGLJ.J and {rho['GRTJ.J'][1]:.2f} for GRTJ.J, so most orders are reactions to earlier orders. After a buy market order the ask side is replenished with a half-life of about {1000 * eff['half_life_buy_mo_to_agg_ask_lo']['AGLJ.J']:.0f} ms (@sec-hawkes).
+""")
+else:
+    print("The headline results are collected in the concluding chapter (@sec-conclusion).")
+```
+:::
+
+::: {.content-visible when-profile="synthetic"}
+This build runs on simulated data; see the real-data build for the findings.
+:::
+
+## What the project demonstrates
+
+| Area | In this book |
+|---|---|
+| **Data engineering** | streaming a 16-million-row vendor export, schema-stable pivoting, Parquet, an external merge sort with a bounded-memory heap merge, event-time merging of two feeds |
+| **Market microstructure** | Lee–Ready trade classification, market-state markers and auctions, effective, quoted and realised spreads, price impact, VPIN, order-book resilience, intraday seasonality |
+| **Statistics** | heavy tails (Hill and Clauset–Shalizi–Newman estimators), long-memory autocorrelation, regressions on binned data, permutation baselines, likelihood-ratio and residual-based goodness-of-fit tests |
+| **Stochastic modelling** | a ten-variate Hawkes process: likelihood with an $O(N)$ Markov recursion and analytic gradients compiled with numba, maximum likelihood with L-BFGS-B, generalised residuals; simulation by Ogata thinning, with parameter recovery |
+| **Software engineering** | a documented Python package, unit tests, a Snakemake pipeline, locked dependencies, Docker, CI and automatic publication, and a synthetic data generator so that the licensed data never need to be shared |
+
+## How to read this book
+
+The three parts can be read independently. Readers interested mainly in trading costs can start with Part II, and those interested in modelling with Part III. Code is folded under each figure and table ("Show code"), and the source of the key functions is printed where the method matters. Every number in the text is computed from the data when the page is rendered. @sec-repro explains how to regenerate everything, and @sec-synthetic describes the synthetic market that lets anyone do so without the licensed data.
+
+**Author:** Lungelo Phewa, Statistical Sciences, University of Cape Town. Source code: [GitHub](https://github.com/LungeloPhewa/jse-market-microstructure).

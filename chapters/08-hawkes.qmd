@@ -1,0 +1,300 @@
+# A Hawkes model of order flow {#sec-hawkes}
+
+{{< include _part3-setup.qmd >}}
+
+## The Hawkes Model
+
+An $M$-variate Hawkes process has the intensity [@hawkes1971spectra; @jericevich2021simulation]
+$$
+\lambda^m(t) = \mu^m + \sum_{n=1}^{M}\sum_{t^n_k < t} \alpha^{mn} e^{-\beta^{mn}(t - t^n_k)}, \qquad m = 1,\dots,M,
+$$
+with $M = 10$. $\mu^m$ is the baseline (exogenous) rate of type-$m$ events, and each past type-$n$ event raises the rate of type-$m$ events by $\alpha^{mn}$, an effect that decays at rate $\beta^{mn}$. Two derived quantities make the 210 parameters interpretable:
+
+* the **branching ratio** $\Gamma^{mn} = \alpha^{mn}/\beta^{mn}$, the expected number of type-$m$ events triggered by one type-$n$ event, and
+* the **half-life** $t_{1/2}^{mn} = \ln 2 / \beta^{mn}$, the time for that effect to fall to half its initial size.
+
+$\Gamma^{mm}$ is self-excitation and $\Gamma^{mn}$, $m \neq n$, mutual excitation. The process is stationary when the spectral radius of $\Gamma$ is below 1.
+
+**Estimation.** The parameters are estimated by maximum likelihood [@toke2012modelling; @jericevich2021simulation, Appendix B]. The log-likelihood is a sum of one term per target type $m$,
+$$
+\ln \mathcal L^m = \sum_{t^m_l \le T} \ln \lambda^m(t^m_l) - \mu^m T - \sum_{n=1}^{M}\frac{\alpha^{mn}}{\beta^{mn}}\sum_{t^n_k \le T}\left(1 - e^{-\beta^{mn}(T - t^n_k)}\right),
+$$
+so each target is fitted separately with its own 21 parameters. The intensity is computed with the paper's Markov recursion for the exponential kernel (eq. B.4), in one pass over the event stream, with exact analytic gradients. The optimiser is L-BFGS-B on the logarithms of the parameters (which keeps them positive), started from three decay rates (0.1, 1 and 10 per second), keeping the best optimum. Decay rates are bounded between $10^{-3}$ and $10^{3}$ per second, i.e. half-lives between about 1 ms and 11 minutes. The code was checked on a simulated three-variate process, from which it recovers the true parameters.
+
+**Data handling.** One model is fitted per stock and trading day on the continuous session (about 09:00 to 16:50, $T \approx 28\,200$ s), with the intraday auction removed from the clock. Times are stamped to the millisecond and several events often share a millisecond (one book update can change several price levels), but a Hawkes process has no simultaneous events. Each event time therefore receives a uniform random offset within its millisecond, with a fixed seed. Effects with half-lives at the 1 ms bound should be read as *within the same book update*.
+
+The main results use the example day of Part II, `{python} EXAMPLE_DAY_STR`. Because one day is a single snapshot of the market, the model is also fitted on every day, and the median over days is reported as a check on how stable each effect is.
+
+## Results
+
+```{python}
+#| include: false
+lr = {ric: 2 * (ex[ric]["loglik"] - ex[ric]["poisson_loglik"]) for ric in RICS}
+rho = {ric: ar.spectral_radius(ex[ric]) for ric in RICS}
+rho_days = {ric: [ar.spectral_radius(f) for f in fits[ric].values()] for ric in RICS}
+conv = {ric: all(all(f["converged"]) for f in fits[ric].values()) for ric in RICS}
+n_fit_days = {ric: len(fits[ric]) for ric in RICS}
+```
+
+```{python}
+#| include: false
+def rr(ric):
+    return f"{rho[ric]:.2f}"
+
+def rrd(ric, f):
+    return f"{f(rho_days[ric]):.2f}"
+
+def lrr(ric):
+    return f"{round(lr[ric]):,}"
+```
+
+All `{python} n_fit_days['AGLJ.J']` AGLJ.J and `{python} n_fit_days['GRTJ.J']` GRTJ.J daily fits converged. The Hawkes model fits far better than a Poisson process with constant rates: on the example day the likelihood-ratio statistic is `{python} lrr("AGLJ.J")` for AGLJ.J and `{python} lrr("GRTJ.J")` for GRTJ.J on 200 degrees of freedom. Order flow is strongly clustered. The spectral radius of $\Gamma$ is `{python} rr("AGLJ.J")` and `{python} rr("GRTJ.J")` (between `{python} rrd("AGLJ.J", min)` and `{python} rrd("AGLJ.J", max)` across days for AGLJ.J, `{python} rrd("GRTJ.J", min)` and `{python} rrd("GRTJ.J", max)` for GRTJ.J): the processes are stationary but close to critical, so most events are triggered by earlier events rather than arriving exogenously, in line with the near-critical branching ratios reported for other markets [@bacry2015hawkes].
+
+```{python}
+#| label: fig-heatmaps
+#| fig-cap: "Branching ratios on the example day: the expected number of events of the row type triggered by one event of the column type."
+#| fig-height: 5.2
+#| results: hide
+fig, axes = plt.subplots(1, 2, figsize=(12, 5.2), layout="constrained")
+for ax, ric in zip(axes, RICS):
+    im = hp.branching_heatmap(ax, ex[ric], title=ric, vmax=1.0)
+fig.colorbar(im, ax=axes, shrink=0.8, label="Branching ratio")
+plt.show()
+```
+
+```{python}
+#| include: false
+rows = []
+for ric in RICS:
+    p = ar.parameter_table(ex[ric])
+    p.insert(0, "Security", ric)
+    rows.append(p)
+show_table(pd.concat(rows), floatfmt=".3f")
+```
+
+```{python}
+#| label: tbl-params
+#| tbl-cap: "Fitted baseline intensities and branching ratios on the example day, by event type: self-excitation, the total excitation each type receives from the other nine, and the total it exerts on them."
+#| output: asis
+print(LAST_TABLE)
+```
+
+### Bubble plots
+
+The bubble plots follow Figures C.7–C.8 of @jericevich2021simulation. Each panel shows one target event type. Every marker is one source type: its height is the branching ratio $\Gamma^{mn}$ (how many target events one source event triggers), its horizontal position the half-life of the effect, and its area the number of source events, so a large marker high up marks an effect that is both strong and frequently triggered. Half-lives run from a millisecond to minutes, so the horizontal axis is logarithmic; the grey band marks effects at the 1 ms resolution of the data. Colours group the order types (red market orders, blue aggressive limit orders, green passive limit orders, purple aggressive cancellations, brown passive cancellations), with circles for the bid (buy) side and squares for the ask (sell) side.
+
+```{python}
+#| include: false
+key = [1, 2, 3, 4, 7, 8]
+top = {ric: ar.top_effects(med[ric], k=8) for ric in RICS}
+ratio_events = float(counts_mean["AGLJ.J"].sum() / counts_mean["GRTJ.J"].sum())
+slow = {ric: [(int(sv) + 1, int(tv) + 1, float(ex[ric]["branching"][tv, sv]))
+               for tv, sv in np.argwhere(ex[ric]["half_life"] > 300) if ex[ric]["branching"][tv, sv] > 1]
+        for ric in RICS}
+slow_days = {ric: int(sum(((f["half_life"] > 300) & (f["branching"] > 1)).any() for f in fits[ric].values()))
+             for ric in RICS}
+slow_max = max(g for _, _, g in slow["AGLJ.J"]) if slow["AGLJ.J"] else 0.0
+if slow["AGLJ.J"]:
+    _g = [g for _, _, g in slow["AGLJ.J"]]
+    slow_sentence = (f"On the example day {len(_g)} AGLJ.J effect{'s' if len(_g) > 1 else ''} "
+                     f"{'have' if len(_g) > 1 else 'has'} a half-life above five minutes and a branching ratio between {min(_g):.0f} and {max(_g):.0f}.")
+else:
+    slow_sentence = "The example day has no such effect in either stock."
+g19 = [float(f["branching"][8, 0]) for f in fits["AGLJ.J"].values()]
+fast_days = int(sum(f["half_life"][8, 0] < 1 for f in fits["AGLJ.J"].values()))
+g19 = [min(g19), max(g19)]
+frac_bound = {ric: f"{(med[ric]['half_life'] < 1.5 * hp.RESOLUTION).mean():.0%}" for ric in RICS}
+def eff(ric, s, t, what="Gamma", src=med):
+    f, s, t = src[ric], int(s), int(t)
+    return float(f["branching"][t - 1, s - 1] if what == "Gamma" else f["half_life"][t - 1, s - 1])
+```
+
+```{python}
+#| label: fig-bubble-agl
+#| fig-cap: "AGLJ.J, example day: excitation of market orders, aggressive limit orders and aggressive cancellations by every event type."
+#| fig-height: 10
+#| results: hide
+fig = hp.bubble_grid(ex["AGLJ.J"], key, ncols=2, title=f"AGLJ.J, {EXAMPLE_DAY_STR}")
+plt.show()
+```
+
+```{python}
+#| label: fig-bubble-grt
+#| fig-cap: "GRTJ.J, example day: excitation of market orders, aggressive limit orders and aggressive cancellations by every event type."
+#| fig-height: 10
+#| results: hide
+fig = hp.bubble_grid(ex["GRTJ.J"], key, ncols=2, title=f"GRTJ.J, {EXAMPLE_DAY_STR}")
+plt.show()
+```
+
+```{python}
+#| include: false
+rows = []
+for ric in RICS:
+    t = top[ric][["effect", "Gamma", "half_life"]].copy()
+    t.insert(0, "Security", ric)
+    rows.append(t)
+show_table(pd.concat(rows).rename(columns={"effect": "Source → target", "Gamma": "Branching ratio",
+                                           "half_life": "Half-life (s)"}), floatfmt=".3f")
+```
+
+```{python}
+#| label: tbl-top
+#| tbl-cap: "The strongest excitation effects: median branching ratio and half-life over all trading days."
+#| output: asis
+print(LAST_TABLE)
+```
+
+```{python}
+#| include: false
+def ef(ric, s, t, what="Gamma", d=2):
+    return f"{eff(ric, s, t, what):.{d}f}"
+
+def efms(ric, s, t):
+    h = eff(ric, s, t, "half_life")
+    return f"{1000 * h:.0f} ms" if h < 1 else f"{h:.1f} s"
+```
+
+The same relationships appear on the example day (@fig-bubble-agl, @fig-bubble-grt) and in the medians over all days (@tbl-top, Appendix). Four groups stand out.
+
+**Market orders are the strongest triggers.** Market orders are the rarest events (the smallest markers), but in both stocks most of the largest branching ratios have a market order as their source (@tbl-top). Each market order sets off a burst of activity in the book.
+
+**At the best quotes: withdrawal within milliseconds, then replenishment.** A sell market order is followed by aggressive bid cancellations (median branching ratio `{python} ef("AGLJ.J", 2, 7)` for AGLJ.J and `{python} ef("GRTJ.J", 2, 7)` for GRTJ.J, half-lives `{python} efms("AGLJ.J", 2, 7)` and `{python} efms("GRTJ.J", 2, 7)`), and a buy market order by aggressive ask cancellations (`{python} ef("AGLJ.J", 1, 8)` and `{python} ef("GRTJ.J", 1, 8)`): liquidity providers withdraw what is left of their quote when the market trades through it. Part of this effect is a distortion of the kind @jericevich2021simulation warn about: a depletion of the best level that cannot be matched to a trade print within half a second (an execution against hidden size, or one reported late) is classified as a cancellation. New aggressive limit orders then rebuild the best quotes. After a buy market order, aggressive ask limit orders follow (`{python} ef("AGLJ.J", 1, 4)` and `{python} ef("GRTJ.J", 1, 4)`, half-lives `{python} efms("AGLJ.J", 1, 4)` and `{python} efms("GRTJ.J", 1, 4)`), and aggressive bid limit orders follow on the other side (`{python} ef("AGLJ.J", 1, 3)` and `{python} ef("GRTJ.J", 1, 3)`) as liquidity providers move their bids up behind the price. Sell market orders mirror this. This is the order-level counterpart of the resilience measured in Part II, and it happens within a fraction of a second.
+
+**Deeper in the book: market orders reprice the quote ladder (AGLJ.J).** The largest median branching ratios in AGLJ.J are not at the best quotes but from market orders to passive limit orders and passive cancellations on both sides of the book: a buy market order is followed by passive bid cancellations (median `{python} ef("AGLJ.J", 1, 9)`) and passive bid limit orders (`{python} ef("AGLJ.J", 1, 5)`), a sell market order by passive ask cancellations (`{python} ef("AGLJ.J", 2, 10)`). When the price moves, algorithms that keep orders at several levels behind the best quote cancel them and repost them relative to the new quote, so one market order can trigger more than one event of a type. In GRTJ.J the same effects are much weaker (`{python} ef("GRTJ.J", 1, 9)` and `{python} ef("GRTJ.J", 2, 10)`). These are also the least stable effects in the model. For buy market orders on passive bid cancellations, the daily half-life is below one second on `{python} fast_days` of the 21 days but several minutes on others, and the daily branching ratio ranges from `{python} f"{g19[0]:.1f}"` to `{python} f"{g19[1]:.0f}"`.
+
+**Cancel-and-replace, and the passive posting cycle.** Aggressive cancellations trigger aggressive limit orders on the same side almost immediately (bid side: `{python} ef("AGLJ.J", 7, 3)` for AGLJ.J and `{python} ef("GRTJ.J", 7, 3)` for GRTJ.J, half-lives `{python} efms("AGLJ.J", 7, 3)` and `{python} efms("GRTJ.J", 7, 3)`): a trader who moves a quote cancels it and resubmits it at a new price, and the book feed shows a cancellation and a new limit order in the same update. Passive limit orders trigger passive cancellations on the same side in the same way (`{python} ef("AGLJ.J", 6, 10)` and `{python} ef("GRTJ.J", 6, 10)` on the ask side), and passive limit orders excite further passive limit orders. Effects whose half-life sits at the 1 ms bound (`{python} frac_bound['AGLJ.J']` of the 100 effects for AGLJ.J, `{python} frac_bound['GRTJ.J']` for GRTJ.J, in the median fit) describe events that arrive in the same book update, not reactions by different traders.
+**Slow effects are changes in the level of activity.** Those long half-lives have a different meaning. `{python} slow_sentence` Effects like these (half-life over five minutes, branching ratio above 1) appear on `{python} slow_days['AGLJ.J']` of the `{python} N_DAYS` AGLJ.J days and on `{python} slow_days['GRTJ.J']` GRTJ.J days, mostly from market orders to passive orders or cancellations. They are not reactions to individual orders. Market orders arrive when the whole book is busy (after the open, around news), and with a constant baseline rate the model can only explain slow swings in activity as a long-lasting excitation by the market orders that precede them. With one exponential per pair, the likelihood must choose between this slow component and the fast repricing reaction, and it chooses differently on different days. The effects in this paragraph are therefore a symptom of nonstationarity (see validation), and the medians over days in @tbl-top and the Appendix are a better summary than any single day.
+
+The two stocks share the same structure but differ in scale and in where the activity happens. AGLJ.J generates about `{python} round(ratio_events)` times as many events a day as GRTJ.J, almost all of them passive orders and cancellations away from the best quotes, and its market orders reverberate through the whole ten-level book. GRTJ.J's book is thinner and quieter; its activity is concentrated at the best quotes, and its market orders are a larger share of all events, so the market-order markers in its plots are relatively larger.
+
+### Validation
+
+```{python}
+#| include: false
+tests = {ric: ex[ric]["tests"] for ric in RICS}
+res = {ric: hk.residuals(ex[ric]["times"], ex[ric]["types"], ex[ric], 10)[0] for ric in RICS}
+mean_res = {ric: (float(tests[ric]["mean"].min()), float(tests[ric]["mean"].max())) for ric in RICS}
+ks_pass = {ric: int((tests[ric]["KS p"] > 0.05).sum()) for ric in RICS}
+_passed = [f"{ric} {oe.EVENT_NAMES[int(k)].lower().replace('mo', 'market orders')}"
+           for ric in RICS for k in tests[ric].loc[tests[ric]["KS p"] > 0.05, "event"]]
+_words = {0: "none passes", 1: "only one passes", 2: "only two pass", 3: "only three pass"}
+ks_text = (_words.get(len(_passed), f"only {len(_passed)} pass") + " the Kolmogorov–Smirnov test at 5%"
+           + (f" ({', '.join(_passed)})" if _passed else ""))
+```
+
+If the model is correctly specified, the generalised residuals $e^m_i = \int_{t^m_i}^{t^m_{i+1}} \lambda^m(s)\,ds$ of each event type are independent and exponentially distributed with mean 1 [@bowsher2007modelling]. @fig-qq compares their quantiles with those of the exponential distribution and @tbl-tests reports Kolmogorov–Smirnov tests of the exponential distribution and Ljung–Box tests of independence (10 lags).
+
+```{python}
+#| label: fig-qq
+#| fig-cap: "Generalised residuals of each event type against Exponential(1) quantiles, example day."
+#| fig-height: 4.6
+#| results: hide
+fig, axes = plt.subplots(1, 2, figsize=(11, 4.6), layout="constrained")
+for ax, ric in zip(axes, RICS):
+    hp.residual_qq(ax, res[ric], title=ric)
+plt.show()
+```
+
+```{python}
+#| include: false
+rows = []
+for ric in RICS:
+    t = tests[ric].copy()
+    t.insert(0, "Security", ric)
+    t["event"] = t["event"].map(lambda k: f"{k}: {oe.EVENT_NAMES[k]}")
+    rows.append(t)
+show_table(pd.concat(rows).rename(columns={"event": "Event", "n": "Residuals", "mean": "Mean"}), floatfmt=".3f")
+```
+
+```{python}
+#| label: tbl-tests
+#| tbl-cap: "Goodness of fit on the example day: number of residuals, their mean (1 under the model), and p-values of the Kolmogorov–Smirnov and Ljung–Box tests."
+#| output: asis
+print(LAST_TABLE)
+```
+
+```{python}
+#| include: false
+def nks(ric):
+    k = ks_pass[ric]
+    return "No" if k == 0 else str(k)
+
+def mr(ric, i):
+    return f"{mean_res[ric][i - 1]:.3f}"
+```
+
+The model captures the overall level of activity of every event type: the mean residual is between `{python} mr("AGLJ.J", 1)` and `{python} mr("AGLJ.J", 2)` for AGLJ.J and between `{python} mr("GRTJ.J", 1)` and `{python} mr("GRTJ.J", 2)` for GRTJ.J, against 1 under the model. The formal tests are much stricter. Of the 20 event types (ten per stock), `{python} ks_text`, and the residuals of most types remain autocorrelated. The QQ-plots show where the fit falls short: the upper quantiles bend away from the line, so long gaps between events are longer than the model predicts. Three features of real order flow that the reference model leaves out explain this. Activity varies through the day (Part II found volatility and volume about twice their daily averages after the open), while the baseline rates here are constant. A single exponential kernel per pair imposes one time scale, whereas order-book reactions mix millisecond, second and minute scales. And with tens of thousands of events, even small departures are statistically significant. The tests are as strict as they are because the samples are large: unlike the simulated data in @jericevich2021simulation, real data were not generated by the model.
+
+### Stability across days
+
+```{python}
+#| label: fig-stability
+#| fig-cap: "Branching ratios of key effects on each of the 21 trading days (dots) and their median (bar). Effects are labelled source → target by event number."
+#| fig-height: 4.6
+#| results: hide
+pairs = [(1, 4), (2, 3), (1, 3), (2, 4), (2, 7), (1, 8), (7, 3), (8, 4), (6, 10), (5, 9)]
+fig, axes = plt.subplots(1, 2, figsize=(12, 4.6), layout="constrained", sharey=True)
+rng = np.random.default_rng(0)
+for ax, ric in zip(axes, RICS):
+    s = ar.stability(fits[ric], pairs)
+    labels = [f"{a}→{b}" for a, b in pairs]
+    for i, lab in enumerate(labels):
+        v = s.loc[s["effect"] == lab, "Gamma"].to_numpy()
+        _ = ax.scatter(i + rng.uniform(-0.15, 0.15, len(v)), v, s=10, color=hp.COLOURS[pairs[i][0]], alpha=0.7)
+        _ = ax.hlines(np.median(v), i - 0.3, i + 0.3, color="black", linewidth=2)
+    _ = ax.set_xticks(range(len(labels)), labels, fontsize=8)
+    _ = ax.set_title(ric, fontsize=10)
+    _ = ax.grid(axis="y", alpha=0.3)
+axes[0].set_ylabel("Branching ratio")
+plt.show()
+```
+
+Fitting every day separately shows which effects are features of the market and which belong to one day (@fig-stability). The market-order effects on the best quotes (1→4, 2→3, 2→7, 1→8), cancel-and-replace (7→3, 8→4) and the passive posting cycle (6→10, 5→9) are present on almost every day, although their size varies from day to day. Half-lives vary much more than branching ratios: with one exponential per pair the likelihood picks a single time scale, and on different days it settles on different points of what is really a range of reaction times.
+
+## Discussion
+
+The reference model of @jericevich2021simulation turns out to be a useful description of real JSE order flow once the data are prepared to match its assumptions. Its main messages are robust across days and stocks: order flow is close to critical, market orders are the key triggers, the best quotes are replenished within a fraction of a second, and much of the book's activity is quotes being moved or refreshed. The bubble plots make these relationships visible at a glance in a way the 210 raw parameters do not.
+
+The paper's central warning also applies here, in a different form. In the paper, the matching engine changes the event types that are injected; here, the events are inferred from data that already passed through the JSE's matching engine and two separate data feeds. A depletion of the best quote that cannot be matched to a trade becomes a cancellation; an aggressive limit order that crosses the spread becomes a market order; an amendment becomes a cancellation and a new order. These mechanics show up as very fast, very strong effects (half-lives at or near 1 ms) that describe the plumbing of the market as much as traders' behaviour.
+
+Three extensions would address the validation results: baseline intensities that vary through the day (or fitting separate windows), kernels with several time scales or a power law, and order-level message data, which would remove the need to infer events from snapshots.
+
+## Summary of Part III
+
+Step 0 separated auction call periods, uncross prints and off-book reports from continuous trading using the exchange's own market-state markers. This removed, among other things, an intraday auction whose uncross was 30–40% of one day's volume and which the clock-time filter of Part II had kept. From the cleaned data the ten order event types of @jericevich2021simulation were identified, and a ten-variate Hawkes process with exponential kernels was calibrated by maximum likelihood for both stocks on every trading day. The model fits far better than a Poisson process and captures each event type's average rate, but not every aspect of the timing. The bubble plots show the same structure in both stocks: market orders are the strongest triggers, quotes at the best prices are withdrawn within milliseconds of a market order and replenished within a fraction of a second, quotes are moved by cancel-and-replace, and passive depth is posted and cancelled in rapid cycles. In AGLJ.J, whose book is about `{python} round(ratio_events)` times as active, market orders also set off the repricing of orders deeper in the book. The least stable effects, with half-lives from under a second to the 11-minute bound depending on the day, show the limits of a constant baseline and a single exponential kernel for a full trading day.
+
+## Bubble plots for all event types, median over all days
+
+```{python}
+#| label: fig-bubble-agl-all
+#| fig-cap: "AGLJ.J: median branching ratio and half-life over all trading days, all ten target event types; marker area is proportional to the mean daily number of source events."
+#| fig-height: 12.5
+#| results: hide
+fig = hp.bubble_grid(med["AGLJ.J"], list(range(1, 11)), ncols=2, title="AGLJ.J, median over all days")
+fig.set_size_inches(10.4, 12.5)
+plt.show()
+```
+
+```{python}
+#| label: fig-bubble-grt-all
+#| fig-cap: "GRTJ.J: median branching ratio and half-life over all trading days, all ten target event types; marker area is proportional to the mean daily number of source events."
+#| fig-height: 12.5
+#| results: hide
+fig = hp.bubble_grid(med["GRTJ.J"], list(range(1, 11)), ncols=2, title="GRTJ.J, median over all days")
+fig.set_size_inches(10.4, 12.5)
+plt.show()
+```
+
+```{python}
+#| include: false
+from jsemicro.reporting import record
+record(hawkes_rho=rho, hawkes_rho_days={r: [float(min(rho_days[r])), float(np.median(rho_days[r])), float(max(rho_days[r]))] for r in RICS},
+       hawkes_lr=lr, hawkes_ks_pass=ks_pass, hawkes_n_days=n_fit_days,
+       hawkes_example_day=str(EXAMPLE_DAY),
+       hawkes_effects={"buy_mo_to_agg_ask_lo": {r: eff(r, 1, 4) for r in RICS},
+                       "sell_mo_to_agg_bid_cancel": {r: eff(r, 2, 7) for r in RICS},
+                       "agg_bid_cancel_to_agg_bid_lo": {r: eff(r, 7, 3) for r in RICS},
+                       "half_life_buy_mo_to_agg_ask_lo": {r: eff(r, 1, 4, "half_life") for r in RICS}},
+       events_per_day={r: float(counts_mean[r].sum()) for r in RICS})
+```

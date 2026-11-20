@@ -1,0 +1,66 @@
+project:
+  type: book
+  output-dir: _book
+
+book:
+  title: "Market Microstructure of the JSE from Tick Data"
+  subtitle: "A reproducible study of Anglo American and Growthpoint: data engineering, trading costs and a Hawkes model of order flow"
+  author: "Lungelo Phewa"
+  date: today
+  date-format: "D MMMM YYYY"
+  repo-url: https://github.com/LungeloPhewa/jse-market-microstructure
+  repo-actions: [source, issue]
+  search: true
+  chapters:
+    - index.qmd
+    - chapters/01-introduction.qmd
+    - part: "Part I · Engineering a tick-data pipeline"
+      chapters:
+        - chapters/02-pipeline.qmd
+        - chapters/03-order-flow.qmd
+    - part: "Part II · Microstructure and the cost of trading"
+      chapters:
+        - chapters/04-bars-stylised-facts.qmd
+        - chapters/05-impact-seasonality-resilience.qmd
+        - chapters/06-cost-of-trading.qmd
+    - part: "Part III · Order flow as a Hawkes process"
+      chapters:
+        - chapters/07-market-phases-events.qmd
+        - chapters/08-hawkes.qmd
+    - chapters/09-reproducibility.qmd
+    - chapters/10-conclusion.qmd
+    - chapters/references.qmd
+  appendices:
+    - chapters/A-synthetic-data.qmd
+    - chapters/B-code-reference.qmd
+    - chapters/C-ai-statement.qmd
+
+bibliography: references.bib
+link-citations: true
+
+execute:
+  echo: false
+  warning: false
+  message: false
+  freeze: auto
+
+jupyter: python3
+
+format:
+  html:
+    theme:
+      light: cosmo
+      dark: darkly
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    html-math-method: mathjax
+    fig-cap-location: bottom
+    tbl-cap-location: top
+    fig-width: 9
+    fig-height: 5
+    fig-dpi: 110
+    css: styles.css

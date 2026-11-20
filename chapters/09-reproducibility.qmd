@@ -1,0 +1,247 @@
+# Reproducibility {#sec-repro}
+
+```{python}
+#| include: false
+import hashlib
+import importlib.metadata as md
+import os
+import platform
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from jsemicro.config import PATHS, REPO, data_mode
+from jsemicro.reporting import show_source
+from jsemicro import integrity
+from jsemicro.synthetic import generator
+
+os.chdir(REPO)
+```
+
+A result that cannot be regenerated cannot be checked, extended or trusted, and in a bank it cannot pass model validation or audit. This project is built so that a reader with nothing but the repository can rerun every stage, from raw exports to this web site, with one command. Readers who hold the licensed exports can verify that the published numbers come from exactly those files.
+
+## What has to be reproducible
+
+An analysis is a function of four things: inputs, code, software environment and randomness. Writing $\mathcal{D}$ for the data, $\mathcal{C}$ for the code at a given commit, $\mathcal{E}$ for the environment and $s$ for the random seeds, every published number is
+$$
+\theta = f_{\mathcal{C}, \mathcal{E}}(\mathcal{D}; s).
+$$
+Reproducibility means pinning each argument: $\mathcal{D}$ by checksums, $\mathcal{C}$ by Git, $\mathcal{E}$ by a lock file and a container image, and $s$ by explicit seeds. The order of computation is pinned too, by a declared pipeline, so that nobody has to remember which script to run first.
+
+| Threat | Example | Control |
+|---|---|---|
+| Inputs change | an export is re-downloaded with a different date range | SHA-256 checksums of the raw and prepared files, committed (@sec-repro-integrity) |
+| Inputs unavailable | the data are licensed | a synthetic market in the same format, so that the whole pipeline still runs (@sec-synthetic) |
+| Order of steps | a stage is run by hand, or not at all | Snakemake pipeline: each step declares its inputs and outputs (@sec-repro-pipeline) |
+| Hard-coded paths | `C:\Users\...` in a script | one `config` module; the data root is an environment variable |
+| Package versions | a pandas upgrade changes timestamp units | exact versions in `requirements-lock.txt` |
+| System software | a different Quarto or Python | pinned Docker image (@sec-repro-env) |
+| Randomness | a different random case-study day | explicit seeds, listed in @tbl-seeds |
+| Silent errors | a wrong unit or sign convention | unit tests with known answers (@sec-repro-tests) |
+| Report drift | the text says one number and the code another | numbers in the text are computed inline; code shown is the source that ran |
+
+: Threats to reproducibility and their controls. {#tbl-threats}
+
+The second-to-last row is not hypothetical. Two errors of exactly this kind were found while assembling this book (@sec-intro). The time-unit error in particular produced no warning at all: under pandas 3 the code ran and gave plausible but wrong results. Unit tests with known answers are what catch errors like this.
+
+## Project layout
+
+```text
+jse-market-microstructure/
+├── src/jsemicro/            # the Python package: all analysis code, with docstrings
+│   ├── config.py            #   paths and constants; data root from JSEMICRO_DATA
+│   ├── ingest/              #   raw exports -> flat, trimmed, typed tables       (Part I)
+│   ├── pipeline/            #   merge, external sort, clean and classify         (Part I)
+│   ├── eda/                 #   sanity checks, order flow, inter-arrival times   (Part I)
+│   ├── microstructure/      #   bars, impact, seasonality, resilience, costs     (Part II)
+│   ├── hawkes/              #   market phases, order events, Hawkes MLE          (Part III)
+│   ├── synthetic/           #   LOB simulator writing Refinitiv-format exports
+│   ├── integrity.py         #   SHA-256 checksums
+│   └── __main__.py          #   command line: python -m jsemicro <stage>
+├── workflow/Snakefile       # the pipeline: which stage needs what
+├── tests/                   # unit tests (pytest)
+├── chapters/, index.qmd     # this book (reads cached results; never recomputes the pipeline)
+├── _freeze/                 # executed results of the real-data chapters (committed)
+├── data/checksums/          # SHA-256 of the licensed inputs (committed; the data are not)
+├── requirements-lock.txt    # exact versions of every Python package
+├── Dockerfile, Makefile     # the environment, and one command per stage
+└── .github/workflows/       # CI: rebuild, test, reproduce on synthetic data, publish
+```
+
+The flow of information is one-way. Raw exports go into the pipeline, which writes prepared files and cached results under the data root. The book reads only those, so the expensive work (the 42 Hawkes fits take about an hour) is done once, by the pipeline, and never repeated inside a chapter.
+
+## The pipeline {#sec-repro-pipeline}
+
+Snakemake [@molder2023snakemake] describes the pipeline as a set of rules. Each rule names its input files, its output files and the command that turns one into the other. Snakemake builds the directed acyclic graph of these dependencies and runs a rule only when its output is missing or older than an input. The analysis modules are listed as inputs too, so changing the code of a stage reruns that stage and everything downstream, and nothing else.
+
+```{python}
+#| label: fig-dag
+#| output: asis
+#| fig-cap: "The pipeline's rule graph, generated by Snakemake from workflow/Snakefile."
+r = subprocess.run([sys.executable, "-m", "snakemake", "-s", "workflow/Snakefile", "--rulegraph", "--quiet", "all"],
+                   capture_output=True, text=True, env={**os.environ, "JSEMICRO_DATA": "synthetic"})
+dot = r.stdout
+import re
+nodes = dict(re.findall(r'(\d+)\[label = "([^"]+)"', dot))
+edges = re.findall(r"(\d+) -> (\d+)", dot)
+lines = ["flowchart LR"] + [f'  n{k}["{v}"]' for k, v in nodes.items()] + [f"  n{a} --> n{b}" for a, b in edges]
+print("```{mermaid}\n%%| fig-cap: \"The pipeline's rule graph, generated by Snakemake from workflow/Snakefile.\"\n"
+      + "\n".join(lines) + "\n```")
+```
+
+The same `Snakefile` serves both data sets. With `JSEMICRO_DATA=synthetic` an extra first rule simulates the raw exports. Otherwise the pipeline expects the licensed exports in `data/real/raw/`.
+
+| Command | What it does |
+|---|---|
+| `make test` | unit tests (no data needed, seconds) |
+| `make synthetic` | tests, then simulate, run the pipeline and render the book on synthetic data (about 5 minutes) |
+| `make real` | tests, pipeline on the licensed exports (about 2 hours, mostly the Hawkes fits), render |
+| `make docker-synthetic`, `make docker-real` | the same inside the pinned container |
+
+: The main commands. {#tbl-make}
+
+## Code as documented functions
+
+All computation lives in functions of the `jsemicro` package, each with a docstring stating what it computes, its inputs and its conventions. Chapters call those functions and display their *actual* source when the method matters (e.g. the trade-sign rule in @sec-pipeline and the power-law MLE in @sec-orderflow). The code in the text is therefore the code that ran. Appendix @sec-code lists every module and function.
+
+Paths are a frequent source of irreproducibility, and they live in one module. The original scripts contained absolute Windows paths. Now every location is derived from the data root:
+
+```{python}
+#| output: asis
+from jsemicro import config
+show_source(config.data_root)
+```
+
+## Data integrity {#sec-repro-integrity}
+
+The licensed exports are not in the repository, but their SHA-256 checksums are (`data/checksums/`). A checksum reveals nothing about the content of a file, but a change of even one byte changes it completely. Anyone with the same exports can run `python -m jsemicro verify` to confirm that they are the files behind the published results. The prepared files are tracked the same way.
+
+```{python}
+#| label: tbl-checksums
+#| tbl-cap: "Recorded SHA-256 checksums (first 16 hex digits) of the inputs behind each build."
+#| output: asis
+rows = []
+for mode in ("real", "synthetic"):
+    f = REPO / "data" / "checksums" / f"{mode}-SHA256SUMS"
+    if f.exists():
+        for name, h in integrity.read_checksums(f).items():
+            rows.append({"build": mode, "file": f"`{name}`", "sha256": f"`{h[:16]}…`"})
+print(pd.DataFrame(rows).to_markdown(index=False))
+```
+
+The original raw exports were not available when this book was assembled from the prepared files, so the real-data checksums start at the flattened stage. Running `python -m jsemicro checksums` on the raw exports adds them.
+
+## Randomness {#sec-repro-seeds}
+
+Four steps involve random numbers, and each has its own explicit seed:
+
+| Step | Use of randomness | Seed |
+|---|---|---|
+| Synthetic exports | Hawkes event times, order sizes and prices per security-day | $s_{k,d} = 20130902 + 1000\,k + (\text{ordinal}(d) \bmod 1000)$ |
+| Cost-of-trading case study | which trading day is analysed | 2013 |
+| VPIN baseline | 200 random permutations of trade signs | 0 |
+| Hawkes input | uniform jitter that breaks ties within one millisecond | 0 |
+
+: Seeds of the stochastic steps. {#tbl-seeds}
+
+A separate seed for each security and day means that adding a day, or changing the parameters of one security, leaves the random streams of all the others unchanged.
+
+The simulator is also *byte*-deterministic. The gzip header normally records the time a file was written; here it is fixed at zero, so re-running the simulation reproduces the exports exactly, checksum included. The test below runs while this page is rendered:
+
+```{python}
+#| label: tbl-determinism
+#| tbl-cap: "Re-simulating the synthetic exports from their seed reproduces the recorded files byte for byte."
+#| output: asis
+want = integrity.read_checksums(REPO / "data" / "checksums" / "synthetic-SHA256SUMS")
+with tempfile.TemporaryDirectory() as d:
+    tx, mdp = generator.write_raw_exports(d)
+    got = {f"raw/{p.name}": integrity.sha256(p) for p in (tx, mdp)}
+rows = [{"file": f"`{k}`", "recorded": f"`{want.get(k, '')[:16]}…`", "re-simulated": f"`{v[:16]}…`",
+         "identical": "yes" if want.get(k) == v else "**no**"} for k, v in got.items()]
+print(pd.DataFrame(rows).to_markdown(index=False))
+```
+
+Floating-point results can still differ in the last digits across processors, because numerical libraries choose different instruction paths on different CPUs. The maximum-likelihood fits use L-BFGS-B from fixed starting values and are deterministic on a given machine. The published conclusions do not depend on digits at that level.
+
+## The software environment {#sec-repro-env}
+
+Python packages are pinned in two layers. `pyproject.toml` lists the direct dependencies with minimum versions, saying what the code needs. `requirements-lock.txt`, frozen from a clean virtual environment, lists every package and its exact version, saying exactly what produced these results. That second layer matters here: pandas 3 changed the default resolution of parsed timestamps from nanoseconds to microseconds, and that change is what turned the time-unit error in Part III from harmless into consequential.
+
+A lock file cannot pin the Python interpreter, Quarto or the operating system. The Docker image [@boettiger2015docker] pins those as well:
+
+```{python}
+#| output: asis
+print("```dockerfile\n" + (REPO / "Dockerfile").read_text() + "```")
+```
+
+The image is built in layers ordered from the least to the most frequently changed (system tools, Quarto, Python packages, then the package itself), so that a code change does not trigger a rebuild of the environment. The repository is *mounted* into the container rather than copied, so the container supplies the environment and the repository supplies the analysis. Results are written back to the host.
+
+```{python}
+#| label: tbl-versions
+#| tbl-cap: "Software versions in the session that rendered this page."
+#| output: asis
+pk = ["pandas", "numpy", "scipy", "numba", "pyarrow", "matplotlib", "statsmodels", "snakemake", "pytest"]
+q = subprocess.run(["quarto", "--version"], capture_output=True, text=True).stdout.strip()
+rows = [("Python", platform.python_version()), ("Platform", platform.platform()), ("Quarto", q)] + \
+       [(p, md.version(p)) for p in pk]
+print(pd.DataFrame(rows, columns=["component", "version"]).to_markdown(index=False))
+```
+
+## Tests {#sec-repro-tests}
+
+The unit tests check the building blocks against answers known in advance:
+
+* **Ingestion.** A hand-written FID file is flattened correctly even when events are split across chunks. 07:00 GMT becomes 09:00 SAST, and a file with an unexpected GMT offset is rejected.
+* **Pipeline.** The external merge sort gives the same order as an in-memory sort, including missing keys. The Lee–Ready rule and its tick test give the hand-computed signs.
+* **Statistics.** The ACF of white noise is near zero and that of an AR(1) process is near $\phi$. The power-law MLE recovers $\alpha$ from Pareto samples, and the $x_{\min}$ search ignores a non-power-law body.
+* **Time units.** The market-order window is exactly 10 ms whether timestamps are stored in ns, µs or ms. This is the regression test for the Part III error.
+* **The Hawkes estimator.** Fitted to data simulated from known parameters, it recovers the branching ratios. Its generalised residuals are unit exponential under the true model, and an explosive branching matrix is rejected.
+
+```{python}
+#| label: tbl-unit-tests
+#| tbl-cap: "Unit-test results from running the suite while rendering this page."
+#| output: asis
+import xml.etree.ElementTree as ET
+with tempfile.TemporaryDirectory() as d:
+    xml = Path(d) / "junit.xml"
+    subprocess.run([sys.executable, "-m", "pytest", "-q", f"--junitxml={xml}", "tests"],
+                   capture_output=True, text=True, cwd=REPO)
+    root = ET.parse(xml).getroot()
+rows = []
+for tc in root.iter("testcase"):
+    status = "fail" if tc.find("failure") is not None or tc.find("error") is not None else (
+        "skipped" if tc.find("skipped") is not None else "pass")
+    rows.append({"file": tc.get("classname").split(".")[-1], "test": tc.get("name").replace("test_", "").replace("_", " "),
+                 "seconds": float(tc.get("time")), "result": status})
+tests = pd.DataFrame(rows)
+print(tests.to_markdown(index=False, floatfmt=".2f"))
+n_pass = int((tests["result"] == "pass").sum())
+```
+
+`{python} n_pass` of `{python} len(tests)` tests pass.
+
+## Continuous integration and publishing
+
+On every push to the main branch, GitHub Actions does the following:
+
+1. builds the Docker image, reusing cached layers;
+2. runs the unit tests in it;
+3. reruns the whole pipeline on freshly simulated data and renders the book from scratch, with no cached results;
+4. renders the real-data book from the committed `_freeze/` directory;
+5. publishes both to GitHub Pages: the real-data book at the site root and the synthetic build under `/synthetic/`.
+
+Step 3 shows on every commit that the code runs end to end on a clean machine. Step 4 publishes the real results without the licensed data ever leaving the analyst's machine. Quarto's *freeze* stores the executed output of each chapter, and the stored output is reused as long as the chapter's source is unchanged. If a chapter is edited, it must be re-executed locally (`make real`) and its new `_freeze/` entry committed. Otherwise the CI build fails rather than publish a stale result.
+
+## Version control
+
+The project was developed with one focused commit per task, with messages that state what changed and why, using the conventional prefixes `feat:`, `fix:`, `docs:`, `test:`, `build:` and `ci:`. A tagged release identifies the exact state behind a published version. The two corrections described in @sec-intro are separate `fix:` commits, each with its regression test, so the history shows when and why the results changed.
+
+## Limitations
+
+* **The data cannot be shared.** Third parties can reproduce the *computation* on synthetic data and the *results* only with their own licence for the same exports. The checksums let them confirm that they hold the same files.
+* **Cross-platform floating point.** Results agree to many significant digits across machines, but not necessarily bit for bit.
+* **External resources at build time.** Building the image downloads packages from PyPI and Quarto from GitHub. Pinning the base image by digest and archiving the built image would remove that dependence.

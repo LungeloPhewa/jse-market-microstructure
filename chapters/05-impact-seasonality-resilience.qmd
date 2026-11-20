@@ -1,0 +1,197 @@
+# Price impact, intraday seasonality and order-book resilience {#sec-impact}
+
+{{< include _part2-setup.qmd >}}
+
+## Price Impact
+
+`price_impact.py` reproduces the binning scheme of @harvey2017deviations: each trade's volume is normalised by the security's average daily volume, trades are grouped into 20 logarithmically spaced bins of normalised volume $\omega^* \in [10^{-3}, 10^{0.5}]$, and the average absolute mid-price response $|\Delta m^*|$ is computed per bin, separately for buyer- and seller-initiated trades. A power law
+$$
+|\Delta m^*| = C\,(\omega^*)^{\alpha}
+$$
+is then fitted to the bin averages by least squares on log–log axes.
+
+```{python}
+#| label: fig-price-impact
+#| fig-cap: "Price impact against normalised trade volume (Harvey et al. 2017 binning), with fitted power laws. All trades on all 21 trading days in the sample (2 September – 1 October 2013)."
+#| fig-height: 4.8
+impact_bins, impact_fits = {}, {}
+fig, axes = plt.subplots(1, 2, figsize=(11, 4.8))
+for ax, ric in zip(axes, RICS):
+    impact_bins[ric] = pi.compute_price_impact_bins(trades, md, ric, n_bins=20,
+                                                    vol_lo=1e-3, vol_hi=10**0.5)
+    impact_fits[ric] = pi.plot_price_impact_curve(impact_bins[ric], ric, ax)
+fig.tight_layout()
+plt.show()
+```
+
+```{python}
+#| label: tbl-price-impact
+#| tbl-cap: "Fitted price-impact exponents (log–log OLS on bin averages)."
+#| output: asis
+rows = []
+for ric in RICS:
+    for side in ["Buyer-initiated", "Seller-initiated"]:
+        f = impact_fits[ric][side]
+        rows.append({"Security": ric, "Side": side,
+                     "Exponent alpha": f["slope"], "R-squared": f["r_squared"],
+                     "p-value": f["p_value"]})
+show_table(pd.DataFrame(rows), floatfmt=".3f")
+```
+
+```{python}
+#| include: false
+def imp(ric, side, key, d=3):
+    return f"{impact_fits[ric][side][key]:.{d}f}"
+
+def imp_sig(level=0.05):
+    p = [impact_fits[r][s]["p_value"] for r in RICS for s in ("Buyer-initiated", "Seller-initiated")]
+    n = sum(x < level for x in p)
+    if n == len(p):
+        return "All four slopes are significantly different from zero at the 5% level."
+    if n == 0:
+        return "None of the four slopes is significantly different from zero at the 5% level."
+    return f"Only {n} of the four slopes are significantly different from zero at the 5% level."
+
+def steeper(ric):
+    b = impact_fits[ric]["Buyer-initiated"]["slope"]
+    s = impact_fits[ric]["Seller-initiated"]["slope"]
+    return "buyer-initiated" if b > s else "seller-initiated"
+```
+
+Per-trade price impact is almost flat in trade size. The four fitted exponents are small and of mixed sign: for AGLJ.J, $\alpha$ = `{python} imp("AGLJ.J", "Buyer-initiated", "slope")` for buyer-initiated and `{python} imp("AGLJ.J", "Seller-initiated", "slope")` for seller-initiated trades; for GRTJ.J the corresponding values are `{python} imp("GRTJ.J", "Buyer-initiated", "slope")` and `{python} imp("GRTJ.J", "Seller-initiated", "slope")` (@tbl-price-impact). Over three orders of magnitude of normalised volume, the average absolute mid-price response of a single trade stays between about 0.1 and 4 basis points with no clear trend. Single trades are therefore extremely concave in their impact, more so than the 0.1–0.3 range usually reported for individual trades, and far from the square-root law that holds for metaorders (@sec-costs). Most large prints on these two books are absorbed by visible and hidden depth without moving the mid-price more than a small trade does.
+
+These estimates should not be over-interpreted. Each fit uses at most 20 bin averages, and the fits are weak: for AGLJ.J, $R^2$ = `{python} imp("AGLJ.J", "Buyer-initiated", "r_squared")` (buyers) and `{python} imp("AGLJ.J", "Seller-initiated", "r_squared")` (sellers), with p-values of `{python} imp("AGLJ.J", "Buyer-initiated", "p_value")` and `{python} imp("AGLJ.J", "Seller-initiated", "p_value")`. `{python} imp_sig()` The scatter around the fitted line is largest in the sparsely populated high-volume bins, where a handful of trades determines each average.
+
+
+## Intraday Seasonality
+
+`intraday_seasonality.py` computes three curves on a common grid of 10-minute SAST buckets: total traded volume (TX feed), realised volatility of the mid-price, $\sqrt{\sum r^2}$ over the bucket's log mid-price changes (MD feed), and the mean relative quoted spread (MD feed). Each quantity is first computed per day and bucket, then divided by that day's average bucket, then averaged across days. A value of 1 is therefore an average bucket for that day, and unusually busy or quiet days do not dominate the shape. Buckets reached on fewer than half the sample days are drawn as hollow markers.
+
+```{python}
+#| label: fig-season-agl
+#| fig-cap: "AGLJ.J normalised intraday volume, |return| and quoted-spread curves (10-minute buckets, SAST), averaged over all 21 trading days in the sample (2 September – 1 October 2013)."
+#| fig-height: 8
+fig, axes = plt.subplots(3, 1, figsize=(9, 8), sharex=True)
+_ = ises.plot_seasonality_curves(trades, md, "AGLJ.J", axes, bucket="10min")
+fig.tight_layout()
+plt.show()
+```
+
+```{python}
+#| label: fig-season-grt
+#| fig-cap: "GRTJ.J normalised intraday volume, |return| and quoted-spread curves (10-minute buckets, SAST), averaged over all 21 trading days in the sample (2 September – 1 October 2013)."
+#| fig-height: 8
+fig, axes = plt.subplots(3, 1, figsize=(9, 8), sharex=True)
+_ = ises.plot_seasonality_curves(trades, md, "GRTJ.J", axes, bucket="10min")
+fig.tight_layout()
+plt.show()
+```
+
+The textbook expectation is a U-shape in volume and volatility, elevated after the open and before the close with a midday lull, mirrored by wider spreads where liquidity providers face more adverse-selection risk. Volatility follows this pattern closely in both names. It is highest in the first bucket (about 1.7 times the day's average for AGLJ.J and 2.7 times for GRTJ.J), falls below average from late morning to mid-afternoon, and rises again into the close. Spreads are L-shaped rather than U-shaped: they are widest at the open (1.7 and 1.9 times average), return to about average within the first hour, and do not widen again into the close; GRTJ.J's spread is in fact below its daily average in the last hour. Volume is below average through the morning and midday and rises into the close, reaching 1.4–1.6 times average for AGLJ.J and over 2 times for GRTJ.J in the final half hour, with a visible step around 15:30 SAST, which coincided with the US market open in September 2013.
+
+The open is therefore the most expensive and most volatile period to trade, while the close combines high volume with spreads at or below average.
+
+These patterns support using time-varying parameters in optimal-execution models. A trajectory derived under constant volatility and spread treats the first half hour like midday, although volatility there is roughly twice and the quoted spread around one and a half times the midday level; equally, it ignores the extra volume available into the close. How quickly the book recovers when that liquidity is consumed is examined next.
+
+## Order-Book Resilience and Execution
+
+A basic execution model treats volatility and the cost of trading as constant through the day, so the cost of working an order is its volume times a constant price concession, and the optimal schedule trades at an even pace. The seasonality results above show that neither assumption holds: volatility, spreads and volume all vary systematically between the open, midday and the close. Optimal execution then becomes the minimisation of expected execution cost plus a penalty on the risk of the position still to be traded, with time-varying parameters [@almgren2001optimal], and the optimal trajectory may trade at different rates at different times of day.
+
+The cost of each child order depends on how much displayed liquidity is available when it arrives, and that in turn depends on how quickly the book replenishes after the previous child order consumed liquidity. This is order-book resilience: the speed at which displayed depth recovers after a liquidity shock [@large2007measuring]. If the book refills slowly, part of one child order's impact is still present when the next one arrives; @obizhaeva2013optimal show that in this setting the optimal size and spacing of child orders depend directly on the speed of recovery. Measuring resilience at the open, midday and the close therefore tells us when in the day a trajectory can afford to trade aggressively.
+
+```{python}
+#| include: false
+res = obr.run_resilience(trades, MD_PATH, RICS, volume_quantile=0.95)
+recovery_all = res["recovery_all"]
+wsum = obr.window_recovery_summary(recovery_all, horizons=(1, 10, 60))
+ws = lambda ric, win, col: float(wsum.query("ric == @ric and window == @win")[col].iloc[0])
+_q = res["candidates"].query("qualifies")
+lag_ms = float((_q["footprint_lag_s"].abs().median()) * 1000)
+h10 = recovery_all.loc[recovery_all["horizon_seconds"] == 10, "L1_L3_recovery_pct"]
+h10_stats = {"median": float(h10.median()), "mean": float(h10.mean()),
+             "q99": float(h10.quantile(0.99)), "skew": float(h10.skew())}
+```
+
+**Shocks.** An aggressive order that walks the book prints once per price level, within a few milliseconds, so consecutive prints with the same Lee–Ready sign no more than 10 ms apart are grouped into one market order. In each of three one-hour windows (open 09:10–10:10, midday 12:00–13:00 and close 15:50–16:50 SAST), the 60 largest market orders above the window's 95th percentile of order size are candidates. A candidate is kept only if it is a genuine shock to the *displayed* book (@tbl-shock-screen). Its first print must be at or beyond the displayed best price on the side it hits; a buy printed below the best ask filled against hidden liquidity inside the spread. Its total volume must not exceed the displayed quantity at the prices it traded through, with a 10% tolerance; larger orders filled against hidden or iceberg volume, or were reported trades. It must also clear the best level, and leave a footprint in the depth feed. Because the trade and depth feeds are separate streams, each shock is aligned on that footprint: the depth update within half a second of the first print, closest to it, at which the best level on the side hit moves against the trade. Footprints lie a median `{python} f"{lag_ms:.0f}"` ms from the first print.
+
+**Measurement.** For each shock, depth at the best three price levels (L1–L3) is recorded on both sides of the book: immediately before the footprint, at the footprint ("0 s"), and as the book in force 1, 5, 10, 30 and 60 seconds later. The side hit is the ask after a buyer-initiated order and the bid after a seller-initiated one. Depth is expressed as a percentage of its pre-trade level. Because larger shocks dig deeper holes, resilience is also summarised as the share of each shock's depletion that has been refilled by a given horizon: 100 × (depth − trough) ÷ (100 − trough), where the trough is the lowest depth within the first second.
+
+```{python}
+#| label: tbl-shock-screen
+#| tbl-cap: "Screening of candidate market orders: the 60 largest orders above the 95th percentile of order size in each one-hour window."
+#| output: asis
+rej = res["rejections"].copy()
+rej = rej.assign(_o=rej["window"].map({"open": 0, "midday": 1, "close": 2})).sort_values(["ric", "_o"]).drop(columns="_o")
+show_table(rej.rename(columns={"ric": "Security", "window": "Window", "ok": "Qualifying",
+                               "inside spread (hidden liquidity)": "Inside spread",
+                               "exceeds displayed depth": "Exceeds displayed depth",
+                               "smaller than L1": "Smaller than L1",
+                               "no footprint in book": "No footprint",
+                               "no depth data": "No depth data"}))
+```
+The table above shows that roughly half of the largest orders in each window qualify as shocks to the displayed book. In AGLJ.J the rest are mostly fills against liquidity not shown in the book: inside the spread at the open, and against hidden or iceberg volume (or reported trades) at midday and the close. In GRTJ.J most rejected orders were too small to clear its best level, which often carries a large resting quantity.
+
+```{python}
+#| label: fig-resilience
+#| fig-cap: "Depth at the best three price levels on the side hit after qualifying market orders, as a percentage of its level immediately before the order's footprint, by time of day and trade direction. Lines are medians across shocks; n is the number of shocks."
+#| fig-width: 9
+#| fig-height: 6
+fig = obr.plot_recovery_by_window(recovery_all, RICS)
+plt.show()
+```
+
+```{python}
+#| label: tbl-resilience
+#| tbl-cap: "Resilience by security and window (buyer- and seller-initiated shocks pooled). Depth: median L1–L3 depth on the side hit, % of pre-trade. Opposite: the same for the other side of the book. Depletion: median share of L1–L3 depth removed. Refilled: median share of that depletion refilled after 60 s, and the share of shocks with at least half of it refilled."
+#| output: asis
+show_table(wsum.rename(columns={
+    "ric": "Security", "window": "Window", "shocks": "Shocks",
+    "depth 1s": "Depth 1 s", "depth 10s": "Depth 10 s", "depth 60s": "Depth 60 s",
+    "opposite 60s": "Opposite 60 s", "depletion": "Depletion",
+    "refilled 60s": "Refilled 60 s", "half refilled 60s (% shocks)": "≥ half refilled 60 s (% shocks)"}),
+    floatfmt=".0f")
+```
+
+```{python}
+#| include: false
+def ws_(ric, win, col):
+    return f"{ws(ric, win, col):.0f}%"
+
+def h10(k, fmt="%.0f"):
+    return fmt % h10_stats[k]
+```
+
+The curves and the table report medians across shocks. Depth relative to its pre-trade level is a ratio, bounded below by zero but not above, and its distribution is right-skewed: at +10 s the median is `{python} h10("median")`% and the mean `{python} h10("mean")`%, with a 99th percentile of `{python} h10("q99")`% (skewness `{python} h10("skew", "%.1f")`). The mean is driven by a few shocks after which a large new order happened to arrive, so the median better describes a typical shock.
+
+Displayed depth recovers slowly after a large market order in both securities. A typical qualifying order removes between `{python} ws_("GRTJ.J", "midday", "depletion")` and `{python} ws_("GRTJ.J", "close", "depletion")` of the L1–L3 depth on the side it hits, and after a minute only a small part of that hole has been refilled (@tbl-resilience). Buyer- and seller-initiated shocks behave similarly (@fig-resilience). The opposite side of the book is unaffected after shocks at the open, thins somewhat after midday shocks (to `{python} ws_("AGLJ.J", "midday", "opposite 60s")` and `{python} ws_("GRTJ.J", "midday", "opposite 60s")` after 60 s), and thins markedly after AGLJ.J shocks at the close (to `{python} ws_("AGLJ.J", "close", "opposite 60s")`).
+
+Resilience differs by time of day, and the close is clearly the weakest window. There, shocks remove the most depth (`{python} ws_("AGLJ.J", "close", "depletion")` for AGLJ.J, `{python} ws_("GRTJ.J", "close", "depletion")` for GRTJ.J), the median refill after a minute is only `{python} ws_("AGLJ.J", "close", "refilled 60s")` and `{python} ws_("GRTJ.J", "close", "refilled 60s")`, and depth on the side hit is still at `{python} ws_("AGLJ.J", "close", "depth 60s")` and `{python} ws_("GRTJ.J", "close", "depth 60s")` of its pre-trade level. Midday shocks remove less depth, and depth on the side hit is back to `{python} ws_("AGLJ.J", "midday", "depth 60s")` (AGLJ.J) and `{python} ws_("GRTJ.J", "midday", "depth 60s")` (GRTJ.J) after a minute. The open lies in between for AGLJ.J. For GRTJ.J the open shows the largest refill (`{python} ws_("GRTJ.J", "open", "refilled 60s")` after 60 s).
+
+### Implications for execution
+
+Taken together with the intraday seasonality, these results suggest how a trajectory for a large order should differ through the day.
+
+- **Open:** volatility and quoted spreads are at their highest. Each unit traded is expensive and the price risk of trading quickly is high, even though the book refills at least as well as at the close. Small child orders, kept within the displayed best level, limit the spread paid.
+- **Midday:** volatility is at its lowest, spreads are at about their daily average, and shocks deplete the book least. This is where the trajectory can carry a larger share of the order at a steady pace.
+- **Close:** volume is highest and spreads are no wider than average, but depth taken by a large market order is replaced most slowly. An aggressive child order that sweeps the book leaves it thin for well over a minute, so the next child order would pay for the previous one's impact. Near the close, the order is better worked passively, or in clips smaller than the displayed best level spaced well apart, than in book-sweeping orders.
+
+A constant-parameter schedule that trades evenly through the day ignores all three effects.
+
+These results are descriptive. Depth is measured at fixed horizons rather than modelled as Large's (2007) replenishment process. Each window holds `{python} min(wsum['shocks'])`–`{python} max(wsum['shocks'])` qualifying shocks (@fig-resilience). Close-window shocks are also larger relative to the best level, which is why the share-refilled measure is reported alongside depth. Finally, "the best three levels" are whichever three are best at each moment, so recovery means that the same quantity is again displayed near the market, not that the consumed orders have been replaced at their original prices.
+
+## Price-impact bins
+
+```{python}
+#| label: tbl-impact-bins
+#| tbl-cap: "AGLJ.J price-impact bins (bin averages)."
+#| output: asis
+show_table(pi.combine_price_impact_bins(impact_bins["AGLJ.J"]), floatfmt=".3g")
+```
+
+```{python}
+#| include: false
+from jsemicro.reporting import record
+record(impact_fits={r: {s: {k: float(v) for k, v in d.items() if isinstance(v, (int, float, np.floating))}
+                        for s, d in impact_fits[r].items()} for r in RICS},
+       resilience_h10=h10_stats)
+```

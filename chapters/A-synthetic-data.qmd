@@ -1,0 +1,93 @@
+# A synthetic market {#sec-synthetic}
+
+```{python}
+#| include: false
+import pickle
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from jsemicro.config import REPO
+from jsemicro.reporting import show_source
+from jsemicro.synthetic import generator as g, hawkes_sim
+from jsemicro.hawkes import hawkes as hk
+from jsemicro.hawkes.order_events import EVENT_NAMES
+
+plt.rcParams.update({"figure.dpi": 110, "axes.grid": True, "grid.alpha": 0.3, "font.size": 9})
+alpha, beta = g.excitation()
+GAMMA = alpha / beta
+```
+
+The licensed exports cannot be published. So that the pipeline can still be run, tested and demonstrated by anyone, the package includes a small market simulator, `jsemicro.synthetic`. It writes two files in *exactly* the layout of the Refinitiv exports. The pipeline cannot tell them from the real thing: the same code flattens, cleans, signs, models and renders them. The simulator also has a second use. Because the true parameters of a simulated market are known, it is a test of whether the methods recover them.
+
+## Design
+
+**Order flow.** For each security and day, event times and types are drawn from a ten-variate Hawkes process over the event types of @sec-events (buy and sell market orders, aggressive and passive limit orders and cancellations on each side):
+$$
+\lambda^m(t) = s(t)\,\mu^m + \sum_{n=1}^{10}\sum_{t^n_k < t} \alpha^{mn} e^{-\beta^{mn}(t - t^n_k)}, \qquad s(t) = c\left(1 + a_o e^{-t/\tau_o} + a_c e^{-(T - t)/\tau_c}\right),
+$$
+where $s(t)$ is a U-shaped intraday activity factor normalised to mean one. Events are drawn by Ogata's thinning algorithm [@ogata1981lewis], compiled with numba. Between events every excitation term decays, so the current intensity with $s$ at its maximum bounds the intensity until the next event. A candidate time is proposed from that bound and accepted with probability $\lambda(t)/\bar\lambda$, and its type is drawn in proportion to the $\lambda^m(t)$.
+
+```{python}
+#| output: asis
+show_source(g.excitation)
+```
+
+**The book.** Events are applied to a price-level limit order book on a one-cent grid:
+
+* Market orders consume the best levels and print once per level, in the same millisecond. About 3% are blocks larger than the best level, which walk the book.
+* Aggressive limit orders join or improve the best quote, and land inside the spread when it is wide.
+* Passive limit orders go one to ten ticks behind the best quote.
+* Cancellations remove all or part of a level.
+
+Quotes lean against a slowly moving fair value, so that prices mean-revert around a random walk with realistic daily volatility. Background liquidity keeps at least six levels within fifteen ticks of the touch, so the book does not hollow out over a long day.
+
+**The exchange calendar.** Each day has the JSE's market-state messages (pre-open, opening auction, continuous trading, closing auction, post-close), opening and closing uncross prints flagged `ACT_FLAG1 = U`, a few off-book trades after the close, index records and sync messages. One day has an intraday auction from 12:00 to 12:15. Times are written in GMT with `GMT Offset = +2`, as in the real files, and the Market Depth timestamps lag the trade feed by 1–5 ms.
+
+## Does the estimator recover the truth?
+
+First the estimator alone. One session of the order-flow process is simulated with the AGLJ.J parameters, and the Hawkes model of @sec-hawkes is fitted to the simulated event times and types:
+
+```{python}
+#| include: false
+sec = g.SECURITIES[0]
+T = 7 * 3600 + 50 * 60
+t, k = hawkes_sim.simulate(sec.rate * g.EVENT_SHARE, alpha, beta, T, seed=1, seasonal=False)
+fit = hk.fit_hawkes(t, k, float(T), 10)
+G_hat = fit["branching"]
+err = np.abs(G_hat - GAMMA)
+big = GAMMA > 0.05
+```
+
+```{python}
+#| label: fig-recovery
+#| fig-cap: "Estimated against true branching ratios $\\Gamma^{mn}$ for one simulated session of the ten-variate process: estimator alone (left) and after the full pipeline (right; raw exports → flattening → Lee–Ready signs → event identification → fit), synthetic AGLJ.J."
+pipeline_fit = REPO / "data" / "synthetic" / "out" / "hawkes" / "fit_AGLJ.J_2013-09-04.pkl"
+has_pipe = pipeline_fit.exists()
+fig, axes = plt.subplots(1, 2 if has_pipe else 1, figsize=(11 if has_pipe else 5.5, 5), squeeze=False)
+panels = [("Estimator on simulated events", G_hat)]
+if has_pipe:
+    with open(pipeline_fit, "rb") as fh:
+        G_pipe = pickle.load(fh)["branching"]
+    panels.append(("Full pipeline on synthetic exports", G_pipe))
+for ax, (title, G) in zip(axes[0], panels):
+    ax.scatter(GAMMA.ravel(), G.ravel(), s=18, alpha=0.7)
+    lim = max(GAMMA.max(), G.max()) * 1.05
+    ax.plot([0, lim], [0, lim], color="tab:red", linewidth=0.8)
+    ax.set_xlabel(r"true $\Gamma^{mn}$")
+    ax.set_ylabel(r"estimated $\hat\Gamma^{mn}$")
+    ax.set_title(f"{title}\ncorrelation {np.corrcoef(GAMMA.ravel(), G.ravel())[0, 1]:.2f}")
+fig.tight_layout()
+plt.show()
+corr_pipe = float(np.corrcoef(GAMMA.ravel(), G_pipe.ravel())[0, 1]) if has_pipe else float("nan")
+```
+
+On `{python} f"{len(t):,}"` simulated events the estimator recovers the excitation structure: the `{python} int(big.sum())` non-zero effects are estimated with a mean absolute error of `{python} f"{err[big].mean():.3f}"`, the `{python} int((~big).sum())` zero effects with `{python} f"{err[~big].mean():.3f}"`, and the true structure is clearly visible in the left panel.
+
+The right-hand panel is the more demanding check. There the parameters are estimated after the simulated order flow has been turned into a book, written to vendor-format files, and passed through the whole pipeline: flattening, trade signing, inference of the ten event types from prints and book snapshots, and the fit. The correlation between true and estimated branching ratios is `{python} f"{corr_pipe:.2f}"`. The remaining differences come from the inference step: for example, a market order that clears a level and the cancellation of the next level are hard to tell apart in snapshot data. This is the identification problem that @jericevich2021simulation warn about when moving from simulated messages to real TAQ data.
+
+This check is how the time-unit error of @sec-intro was found. Before the fix, the pipeline found only about half of the simulated market orders, because buy and sell orders up to ten seconds apart were merged. Its estimates showed buy orders exciting *sell* orders instead of buy orders. With the simulator the answer was known in advance, so the discrepancy was obvious; on real data it would have looked like a finding.
+
+## Limits of the synthetic data
+
+The simulator is a test harness, not a model of the JSE. Its statistics resemble the real data in the respects that matter for exercising the code: clustered arrivals, heavy-tailed sizes, spreads of a few ticks, a U-shaped intraday pattern and books that refill after shocks. But its parameters were chosen, not estimated. It has five trading days rather than twenty-one, no hidden liquidity and no news. The synthetic build of this book (published under `/synthetic/`) carries a banner on every page saying that its interpretation text describes the real data, not the simulated numbers next to it.

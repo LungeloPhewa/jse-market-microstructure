@@ -1,0 +1,6 @@
+::: {.content-visible when-profile="synthetic"}
+::: {.callout-warning}
+## Synthetic-data build
+This page was rendered from **simulated** order books, not the licensed JSE data. Every number, table and figure was recomputed by the same code, but the written interpretation describes the real data and will not match it.
+:::
+:::

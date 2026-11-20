@@ -1,0 +1,270 @@
+# From raw exports to an analysis-ready event table {#sec-pipeline}
+
+```{python}
+#| include: false
+import numpy as np
+import pandas as pd
+import pyarrow.parquet as pq
+import matplotlib.pyplot as plt
+
+from jsemicro.config import PATHS, RICS, data_mode
+from jsemicro.reporting import show_source
+from jsemicro.ingest import flatten_taq, trim_tx_columns, market_depth_prepare
+from jsemicro.pipeline import merge_tx_md, taq_stage3_merge, stage4_clean_classify as s4
+from jsemicro.eda import md_premerge_eda as mde, stage5_eda as s5
+
+plt.rcParams.update({"figure.dpi": 110, "axes.grid": True, "grid.alpha": 0.3, "font.size": 9})
+
+
+def n_rows_csv(path):
+    with open(path, "rb") as fh:
+        return sum(buf.count(b"\n") for buf in iter(lambda: fh.read(1 << 24), b"")) - 1
+
+
+flat_cols = pd.read_csv(PATHS.tx_flat, nrows=0).columns
+n_flat_cols = len(flat_cols)
+n_fids = n_flat_cols - 6
+n_events = n_rows_csv(PATHS.tx_flat)
+trim_cols = pd.read_csv(PATHS.tx_trimmed, nrows=0).columns
+n_md = pq.ParquetFile(PATHS.md_flat).metadata.num_rows
+n_merged = pq.ParquetFile(PATHS.merged_sorted).metadata.num_rows
+final = pd.read_parquet(PATHS.stage4)
+n_final = len(final)
+ev_counts = final["event_type"].value_counts()
+```
+
+{{< include _synthetic-banner.qmd >}}
+
+The first part of the project is plumbing, and it is where most of the effort in high-frequency work goes. A month of tick data for two shares arrives as two vendor exports in different shapes. Before any statistic can be computed, the data must be reshaped, typed, filtered, merged in time order, cleaned and classified, all without running out of memory on a laptop and in a way that can be repeated exactly.
+
+## The raw data {#sec-raw}
+
+Top-of-book trade and quote (TAQ) data and ten-level market depth for **Anglo American (AGLJ.J)** and **Growthpoint Properties (GRTJ.J)** on the Johannesburg Stock Exchange, 1 September – 1 October 2013, were exported from Refinitiv Tick History (TRTH) as two compressed CSV files:
+
+* **Transactions.** A *long* format. Each message is one header row (`Type = Raw-TAS`, with RIC, GMT date and time and message type), followed by one row per field (`Type = FID`), each with a field name and a value. A trade print carries `TRDPRC_1`, `TRDVOL_1` and the cumulative volume `ACVOL_1`. A quote update carries `BID`/`BIDSIZE` and/or `ASK`/`ASKSIZE`. Market-state messages carry the qualifiers `PRC_QL2`/`PRC_QL3`. The export also contains index records (`.JTOPI`) and periodic sync messages.
+* **Market Depth.** A *wide* format: one row per change of the ten-level book, with `L1`–`L10` bid and ask prices and sizes.
+
+The exports are licensed and are not part of the public repository. The excerpt below comes from the synthetic exports (@sec-synthetic). They have the same layout, so the same code reads both.
+
+```{python}
+#| label: tbl-raw-sample
+#| tbl-cap: "Excerpt of the raw Transactions export format (synthetic data): three messages, each a header row followed by its FID rows."
+#| output: asis
+raw = pd.read_csv("assets/sample_raw_transactions.csv", dtype=str, keep_default_na=False)
+print(raw.iloc[:16, [0, 1, 2, 3, 4, 6, 7, 8]].to_markdown(index=False))
+```
+
+Two details of the format matter for everything downstream.
+
+1. **Time stamps are GMT.** `Date[G]` and `Time[G]` give the UTC instant, and `GMT Offset = +2` says how far the exchange's clock is *ahead* of it, so $t_{\text{SAST}} = t_{\text{GMT}} + 2\,\text{h}$. The first version of this pipeline subtracted the offset, which shifted every event two hours early: the 09:00 open appeared at 07:00 and the 17:00 close at 15:00. The error came to light in later work: the session filter of @sec-bars dropped the morning and kept post-close prints. It is corrected here throughout. Every time in this book is SAST, and the parser checks that every row of the file states the same +2 offset.
+2. **The field set varies by message.** Different messages carry different FIDs, so pivoting one chunk of the file at a time gives chunks with different columns. Writing them one after the other produces a CSV whose rows have different numbers of fields.
+
+## Stage 1: flattening the FID rows
+
+Let the raw file be a sequence of rows $r_1, r_2, \dots$, and let $h_j$ be the position of the $j$-th header row. Event $j$ consists of rows $h_j, \dots, h_{j+1} - 1$, and its value for field $f$ is the `FID Value` of the row in that block whose `FID Name` is $f$. Flattening is therefore a pivot keyed by the cumulative count of header rows, $g(r_i) = \sum_{k \le i}\mathbb{1}\{r_k \text{ is a header}\}$.
+
+The file has about 16 million rows, so it is streamed in chunks of $2 \times 10^5$ rows. Two problems follow, and each has a fix:
+
+* **Events split across chunks.** An event can start in one chunk and end in the next. The rows from the last header of each chunk onward are carried over and prepended to the next chunk.
+* **A changing schema.** The column set must be the same in every chunk. A first, cheap pass reads only the `FID Name` column to collect the full set of field names. Every chunk is then reindexed onto that fixed, sorted list before it is appended to the output.
+
+The pivot is vectorised (`pivot_table` on the group id). The original row-by-row version would have taken over five hours; this one takes about two minutes. Each event gets a persistent identifier: the hash of (RIC, date, time, occurrence number), which stays the same when the file is re-processed.
+
+```{python}
+#| output: asis
+show_source(flatten_taq.flatten_chunk_vectorized)
+```
+
+On the real data this gives `{python} f"{n_events:,}"` events and `{python} n_fids` distinct fields (`{python} n_flat_cols` columns including the identifiers).
+
+## Stage 2: trimming
+
+Only `{python} len(trim_cols)` of the `{python} n_flat_cols` columns are needed: identity and time, the touch (`BID`, `ASK` and their sizes), the feed's own mid-price, the trade price and volume, cumulative volume, tick direction, the sequence number, and the market-state and off-book fields used in Part III. Selecting them with `usecols` *while reading* means pandas never allocates memory for the other `{python} n_flat_cols - len(trim_cols)` columns. Loading the full-width file had exhausted the memory of the machine it was developed on.
+
+```{python}
+#| output: asis
+print("Columns kept: " + ", ".join(f"`{c}`" for c in trim_cols) + ".")
+```
+
+## Stage 3: preparing the depth feed
+
+The depth export is already wide. It only needs the same timestamp convention and event identifiers as the transactions, plus numeric types for the 40 level columns. It is written to Parquet in row groups with `ParquetWriter`. Many level columns are sparse, so a CSV version filled the disk, whereas the columnar, compressed Parquet file of `{python} f"{n_md:,}"` snapshots is about 350 MB.
+
+### A first look: mid-price and liquidity trends
+
+Before merging, two checks on the depth feed alone confirm that it describes a sensible market. The top-of-book mid-price $m_t = (b_t + a_t)/2$ is computed from every snapshot with both sides quoted; a zero price means "no quote", not a price of zero. Daily means are then smoothed with a centred quadratic (Savitzky–Golay type) filter. With weights $w = \tfrac{1}{35}(-3, 12, 17, 12, -3)$,
+$$
+\tilde m_d = \sum_{k=-2}^{2} w_k\, \bar m_{d+k},
+$$
+fits a local quadratic to five days. It preserves turning points better than a simple moving average.
+
+```{python}
+#| label: fig-mid-trend
+#| fig-cap: "Daily mean L1 mid-price and its quadratic-filter trend."
+fig, axes = plt.subplots(1, 2, figsize=(12, 3.8))
+mid_daily = {}
+for ax, ric in zip(axes, RICS):
+    mp = mde.load_mid_price_series(PATHS.md_flat, ric=ric)
+    daily = mde.resample_to_daily(mp, value_col="mid_price", agg="mean")
+    mid_daily[ric] = daily
+    mde.plot_daily_trend(daily, mde.apply_linear_filter(daily, weights=mde.QUADRATIC_FILTER_5),
+                         ric=ric, ylabel="Mid-price (ZAc)", ax=ax)
+fig.tight_layout()
+plt.show()
+rng_agl = (mid_daily["AGLJ.J"].min() / 100, mid_daily["AGLJ.J"].max() / 100)
+rng_grt = (mid_daily["GRTJ.J"].min() / 100, mid_daily["GRTJ.J"].max() / 100)
+```
+
+Over the month the daily mean mid-price of AGLJ.J ranged from R`{python} f"{rng_agl[0]:.2f}"` to R`{python} f"{rng_agl[1]:.2f}"`, and that of GRTJ.J from R`{python} f"{rng_grt[0]:.2f}"` to R`{python} f"{rng_grt[1]:.2f}"`.
+
+```{python}
+#| label: fig-liquidity-trend
+#| fig-cap: "Daily median size at the best bid and best ask, with quadratic-filter trend."
+fig, axes = plt.subplots(2, 2, figsize=(12, 6.5))
+liq = {}
+for row, ric in zip(axes, RICS):
+    lq = mde.load_liquidity_series(PATHS.md_flat, ric=ric)
+    for ax, col, label in ((row[0], "L1-BidSize", "Bid size"), (row[1], "L1-AskSize", "Ask size")):
+        daily = mde.resample_to_daily(lq, value_col=col, agg="median")
+        liq[(ric, col)] = daily
+        mde.plot_daily_trend(daily, mde.apply_linear_filter(daily, weights=mde.QUADRATIC_FILTER_5),
+                             ric=ric, ylabel=label, ax=ax)
+fig.tight_layout()
+plt.show()
+ratio = {ric: float((liq[(ric, "L1-BidSize")] / liq[(ric, "L1-AskSize")]).median()) for ric in RICS}
+size_ratio = float(liq[("GRTJ.J", "L1-BidSize")].median() / liq[("AGLJ.J", "L1-BidSize")].median())
+```
+
+The median ratio of best-bid to best-ask size over the days is `{python} f"{ratio['AGLJ.J']:.2f}"` for AGLJ.J and `{python} f"{ratio['GRTJ.J']:.2f}"` for GRTJ.J. The median size at the best bid is `{python} f"{size_ratio:.0f}"` times larger for GRTJ.J than for AGLJ.J. Its share price is about a tenth of AGLJ.J's and its tick is the same one cent, so more shares queue at each price.
+
+## Stage 4: merging the two feeds in event time
+
+Both feeds are combined into one table with **one row per event from either feed**; nothing is collapsed. Rows carry a `source` flag, and the top of book is *coalesced* onto canonical names: TX rows use `BID`/`ASK` natively, and MD rows map `L1-BidPrice` to `BID`, and so on. Every batch, from either feed, is reindexed onto one fixed schema with explicit types before it is written. Two row groups with different column sets or types would make the Parquet file unreadable. Only the two equities are kept; index records are dropped.
+
+## Stage 5: an external merge sort
+
+The merged table has `{python} f"{n_merged:,}"` rows and must be put into one global order by the key $(\text{RIC}, t, \text{SEQNUM}, \text{event id})$. Sorting it in memory was not possible on the development machine, so the sort is done *externally*:
+
+1. **Run generation.** Read $C$ chunks of at most $B$ rows, sort each in memory, and write each to its own Parquet file. This costs $O\!\left(\sum_c n_c \log n_c\right) = O(N \log B)$ time and $O(B)$ memory.
+2. **$k$-way merge.** Keep one buffered batch per run and a min-heap of the current head of each run, keyed by the sort key. Repeatedly pop the smallest, write it, and push the next row of the same run. Each of the $N$ rows passes through a heap of size $C$, so the cost is $O(N \log C)$ time and $O(C \cdot b)$ memory for read batches of $b$ rows. The batch size is scaled down automatically when there are many runs.
+
+Missing values in the key are mapped to sort *last*, and timestamps of mixed types to one comparable integer, so that the heap never compares incompatible values. The output is then checked to be non-decreasing in the key over every row.
+
+```{python}
+#| output: asis
+show_source(taq_stage3_merge.verify_sorted)
+```
+
+## Stage 6: cleaning, compacting and classifying
+
+The sorted event stream is turned into the analysis dataset in a fixed sequence of steps. The order matters.
+
+1. **Drop rows without a usable timestamp** and replace zero-price placeholders ("no quote") with missing values.
+2. **Event type.** A row is a *trade* if it has a positive trade price, and a *quote* if it updates the bid or the ask.
+3. **Compact same-timestamp events.** A book update stamped with the same millisecond as another for the same RIC is collapsed to the last state. Same-timestamp trade prints at the same price are aggregated, because a single aggressive order that walks the book prints once per level.
+4. **Session phase.** Continuous trading is 09:10–16:49:59 SAST. The opening call auction (to about 09:00), the early, volatile minutes and the closing auction (16:50–17:00) are labelled separately.
+5. **Prevailing quotes.** Bid, ask and their sizes are forward-filled within RIC, giving the quote in force at every event. From them come the mid-price $m_i = (b_i + a_i)/2$ and its change $\Delta m_i = m_i - m_{i-1}$, and for trades the mid-price change across the trade. Crossed quotes ($b_i > a_i$) are flagged, not dropped.
+6. **Trade signs** by the rule of @lee1991inferring. Comparing the trade price $p_i$ with the prevailing mid gives
+   $$
+   \varepsilon_i = \begin{cases} +1 & p_i > m_i \quad\text{(buyer-initiated)}\\ -1 & p_i < m_i \quad\text{(seller-initiated)}\\ \operatorname{sign}(p_i - p_{\ell(i)}) & p_i = m_i, \end{cases}
+   $$
+   where $p_{\ell(i)}$ is the last trade price *different* from $p_i$. This tick test follows @lim2005immediate.
+7. **Normalised volume.** Each trade's volume divided by the average trade volume of that RIC and day, $\tilde v_i = v_i / \bar v_{d(i)}$, so that sizes are comparable across days and between the two shares. The top 0.1% of $\tilde v$ per RIC are flagged as outliers, not removed.
+
+```{python}
+#| output: asis
+show_source(s4.classify_trades)
+```
+
+```{python}
+#| label: tbl-stage4
+#| tbl-cap: "The analysis dataset: events by security, type and session phase."
+#| output: asis
+tab = (final.groupby(["ric", "event_type", "session_phase"]).size()
+       .unstack("session_phase", fill_value=0))
+tab["total"] = tab.sum(axis=1)
+print(tab.reset_index().to_markdown(index=False, intfmt=","))
+n_trades_final = int(ev_counts.get("trade", 0))
+sign_share = final.loc[final["event_type"] == "trade", "trade_sign"].notna().mean()
+```
+
+The final dataset has `{python} f"{n_final:,}"` events, of which `{python} f"{n_trades_final:,}"` are trades; `{python} f"{100 * sign_share:.2f}%"` of trades receive a sign.
+
+## Daily opening and closing auction prices
+
+The JSE opens and closes with call auctions. The auction price is the single price at which the accumulated orders are matched (the *uncross*), not the first or last continuous trade. In the Transactions export an uncross print is marked by `ACT_FLAG1 = U`, and its volume equals the auction volume `AUCTIONVOL`. The earliest and latest such prints of each day give the opening and closing auction prices. A third print on a day signals an intraday auction (@sec-events).
+
+```{python}
+#| label: tbl-auctions
+#| tbl-cap: "Daily auction prices (ZAc) and volumes, first five days per security."
+#| output: asis
+auc = pd.read_csv(PATHS.auction_prices)
+show = auc.groupby("ric").head(5)[["ric", "date", "open_auction_price", "open_auction_volume",
+                                   "close_auction_price", "close_auction_volume", "n_auction_events"]]
+print(show.to_markdown(index=False, floatfmt=",.0f"))
+n_extra = int((auc["n_extra_intraday_auctions"] > 0).sum())
+```
+
+```{python}
+#| include: false
+# Reconciliation: auction prices against the continuous session's first and last mid-price.
+cont = final[(final["session_phase"] == "continuous") & final["mid_price"].notna()]
+first_last = cont.groupby(["ric", "date"])["mid_price"].agg(first_mid="first", last_mid="last").reset_index()
+auc["date"] = pd.to_datetime(auc["date"]).dt.date
+rec = auc.merge(first_last, on=["ric", "date"], how="inner")
+rec["open_dev_bps"] = 1e4 * (rec["first_mid"] / rec["open_auction_price"] - 1)
+rec["close_dev_bps"] = 1e4 * (rec["close_auction_price"] / rec["last_mid"] - 1)
+rec_med = rec.groupby("ric")[["open_dev_bps", "close_dev_bps"]].apply(lambda x: x.abs().median())
+```
+
+As a cross-check between the two feeds, the opening auction price is compared with the first continuous mid-price of the day, and the closing auction price with the last. The median absolute gap is `{python} f"{rec_med.loc['AGLJ.J', 'open_dev_bps']:.1f}"` and `{python} f"{rec_med.loc['AGLJ.J', 'close_dev_bps']:.1f}"` basis points for AGLJ.J (open, close) and `{python} f"{rec_med.loc['GRTJ.J', 'open_dev_bps']:.1f}"` and `{python} f"{rec_med.loc['GRTJ.J', 'close_dev_bps']:.1f}"` for GRTJ.J. The analysis session starts at 09:10, ten minutes after the opening uncross, so part of the opening gap is genuine price movement. The gaps are a few spreads wide, small enough to confirm that the feeds and the auction records agree on the price level. `{python} n_extra` security-days show an extra intraday uncross.
+
+## Sanity checks
+
+Standard checks on the final dataset ask whether anything is obviously wrong before any modelling.
+
+```{python}
+#| label: fig-row-counts
+#| fig-cap: "Events per day and security."
+daily_counts = s5.check_row_counts(final, verbose=False)
+low = {ric: int((daily_counts[ric] < 0.1 * daily_counts[ric].median()).sum()) for ric in RICS}
+```
+
+**Coverage.** Days with less than a tenth of the median activity (`{python} low['AGLJ.J']` for AGLJ.J): weekends, on which only a few administrative messages are sent, and Heritage Day (24 September), a public holiday. These are market closures, not missing data.
+
+```{python}
+#| label: fig-spread
+#| fig-cap: "Bid–ask spread: median by hour of day (SAST), and its distribution."
+cq = s5.check_spread(final, verbose=False)
+sp_med = cq.groupby("ric")["spread"].median()
+one_tick = cq.groupby("ric")["spread"].apply(lambda x: (x <= 1).mean())
+n_neg = int((cq["spread"] < 0).sum())
+```
+
+**Spreads.** No non-crossed quote has a negative spread (`{python} n_neg` cases). The median spread is `{python} f"{sp_med['AGLJ.J']:.0f}"` cents for AGLJ.J and `{python} f"{sp_med['GRTJ.J']:.0f}"` cents for GRTJ.J. Relative to the price that is `{python} f"{1e4 * sp_med['AGLJ.J'] / final.loc[final.ric == 'AGLJ.J', 'mid_price'].median():.1f}"` and `{python} f"{1e4 * sp_med['GRTJ.J'] / final.loc[final.ric == 'GRTJ.J', 'mid_price'].median():.1f}"` basis points. GRTJ.J's spread is a single tick `{python} f"{one_tick['GRTJ.J']:.0%}"` of the time (AGLJ.J: `{python} f"{one_tick['AGLJ.J']:.0%}"`): in basis points its tick is large, and the spread cannot narrow much below a few ticks. Spreads are widest outside the continuous session and immediately after the open.
+
+```{python}
+#| label: fig-trade-vs-quote
+#| fig-cap: "Distance of trade prices from the prevailing mid-price (%)."
+far = s5.check_trade_vs_quote_sanity(final, verbose=False)
+```
+
+**Trades against quotes.** `{python} len(far)` trades print more than 5% away from the prevailing mid, so trade and quote prices are consistent.
+
+```{python}
+#| label: fig-sign-balance
+#| fig-cap: "Buyer- and seller-initiated trades by security."
+by_ric = s5.check_trade_sign_balance(final, verbose=False)
+buy_share = {ric: by_ric.loc[ric, 1.0] / by_ric.loc[ric].sum() for ric in RICS}
+```
+
+**Trade signs.** Buyer-initiated trades are `{python} f"{100 * buy_share['AGLJ.J']:.1f}%"` of signed AGLJ.J trades and `{python} f"{100 * buy_share['GRTJ.J']:.1f}%"` of GRTJ.J trades: close to balanced, as expected over a month without a strong trend.
+
+```{python}
+#| label: fig-normvol
+#| fig-cap: "Normalised trade volume: distribution and flagged outliers."
+outl = s5.check_normalised_volume(final, verbose=False)
+max_nv = final.groupby("ric")["normalised_volume"].max()
+```
+
+**Volumes.** Normalised trade volume is strongly right-skewed with a heavy tail. Most trades are small, and the largest are `{python} f"{max_nv['AGLJ.J']:.0f}"` (AGLJ.J) and `{python} f"{max_nv['GRTJ.J']:.0f}"` (GRTJ.J) times the day's average trade, which is the pattern expected from order splitting with occasional block trades [@gopikrishnan1999scaling].

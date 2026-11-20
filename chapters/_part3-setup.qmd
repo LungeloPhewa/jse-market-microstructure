@@ -1,0 +1,56 @@
+```{python}
+#| include: false
+import datetime as dt
+import pickle
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
+from jsemicro.config import PATHS, RICS
+from jsemicro.hawkes import market_phases as mp
+from jsemicro.hawkes import order_events as oe
+from jsemicro.hawkes import hawkes as hk
+from jsemicro.hawkes import hawkes_plots as hp
+from jsemicro.hawkes import a3_report as ar
+
+OUT = PATHS.hawkes_dir                       # written by `snakemake hawkes` (jsemicro.hawkes.run)
+TZ = "Africa/Johannesburg"
+if not (OUT / "DONE").exists():
+    raise FileNotFoundError(f"Hawkes results missing in {OUT}: run the pipeline first (make pipeline).")
+
+with open(OUT / "clean.pkl", "rb") as fh:
+    clean = pickle.load(fh)
+events = {}
+for ric in RICS:
+    e = pd.read_parquet(OUT / f"events_{ric}.parquet")
+    e["date"] = pd.to_datetime(e["date"]).dt.date
+    events[ric] = e
+fits = {ric: ar.load_fits(OUT, ric) for ric in RICS}
+N_DAYS = len(fits["AGLJ.J"])
+# The Assignment 2 example day (11 September 2013); on another data set the
+# median day is used instead.
+EXAMPLE_DAY = dt.date(2013, 9, 11)
+if EXAMPLE_DAY not in fits["AGLJ.J"]:
+    _days = sorted(fits["AGLJ.J"])
+    EXAMPLE_DAY = _days[len(_days) // 2]
+EXAMPLE_DAY_STR = f"{EXAMPLE_DAY.day} {EXAMPLE_DAY:%B %Y}"
+ex = {ric: fits[ric][EXAMPLE_DAY] for ric in RICS}
+med = {ric: ar.median_fit(fits[ric]) for ric in RICS}
+diag = {ric: pd.read_csv(OUT / f"event_diag_{ric}.csv") for ric in RICS}
+counts_ex = {ric: ar.event_counts(events[ric], EXAMPLE_DAY) for ric in RICS}
+counts_mean = {ric: ar.event_counts(events[ric]) / events[ric]["date"].nunique() for ric in RICS}
+
+# Tables are built in Python and printed by a separate chunk that carries the
+# table's label and caption.
+LAST_TABLE = ""
+
+
+def show_table(df, index=False, floatfmt=".3g"):
+    global LAST_TABLE
+    out = df.reset_index() if index else df.copy()
+    LAST_TABLE = out.to_markdown(index=False, floatfmt=floatfmt)
+```
+
+{{< include _synthetic-banner.qmd >}}

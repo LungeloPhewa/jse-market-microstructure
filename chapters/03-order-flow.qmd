@@ -1,0 +1,224 @@
+# Order flow, trade arrivals and adverse selection {#sec-orderflow}
+
+```{python}
+#| include: false
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from jsemicro.config import PATHS, RICS
+from jsemicro.reporting import show_source
+from jsemicro.eda import order_flow as of
+from jsemicro.eda import adverse_selection_analysis as asa
+
+plt.rcParams.update({"figure.dpi": 110, "axes.grid": True, "grid.alpha": 0.3, "font.size": 9})
+DAY = "2013-09-04"
+df = pd.read_parquet(PATHS.stage4)
+dfc = df[df["session_phase"] == "continuous"].reset_index(drop=True)
+```
+
+{{< include _synthetic-banner.qmd >}}
+
+With a clean, signed and time-ordered event table, the stylised facts of order flow can be measured. These are the empirical regularities that any model of a limit order book must reproduce. Following @jericevich2020comparing, this chapter looks at three: the visual texture of the book over an hour, the persistence of the direction of trading, and the clustering of trade arrivals. An extension then asks whether larger trades pay more, as theories of adverse selection predict.
+
+## The continuous session
+
+Auction call periods, the uncross prints and the quote changes around them follow a different mechanism from continuous trading. They are removed before any statistic is computed [@jericevich2020comparing]: of `{python} f"{len(df):,}"` events, `{python} f"{len(dfc):,}"` (`{python} f"{100 * len(dfc) / len(df):.1f}%"`) belong to the continuous session.
+
+## An hour of the order book
+
+Each bubble chart shows every change at the touch over an hour: bid updates in blue and ask updates in red, with area proportional to the size at the touch; trades as black circles with area proportional to volume; and the mid-price
+$$
+m_t = \frac{b_t + a_t}{2}
+$$
+and the micro-price
+$$
+\mu_t = \frac{b_t\, v^a_t + a_t\, v^b_t}{v^a_t + v^b_t},
+$$
+which leans towards the side with *less* resting volume, the side more likely to be depleted next. The charts are drawn from the merged, globally sorted file of @sec-pipeline. That file still records which side of the book changed at each event, which the forward-filled columns of the final dataset no longer show.
+
+```{python}
+#| label: fig-bubbles
+#| fig-cap: "Top of book and trades on 4 September 2013: a mid-morning hour and the last hour of the day (16:50–17:00 is the closing auction call)."
+fig, axes = plt.subplots(2, 2, figsize=(12, 8.5))
+for row, ric in zip(axes, RICS):
+    for ax, (start, end) in zip(row, (("10:00", "11:00"), ("16:00", "17:00"))):
+        w = of.load_intraday_window(PATHS.merged_sorted, ric, DAY, start, end)
+        of.plot_intraday_microstructure(w, ric, title=f"{ric}, {start}–{end} SAST", ax=ax)
+fig.tight_layout()
+plt.show()
+```
+
+The micro-price tracks the quotes closely and moves before the mid-price when one side of the book thins out. The last hour shows the change of regime at 16:50: continuous trading stops and the closing auction's call period begins. During the call, the book shows indicative and sometimes crossed quotes far from the market (cut off here) and a few very large orders arriving to be executed at the close.
+
+### Depth behind the best price
+
+```{python}
+#| label: fig-depth
+#| fig-cap: "Ten-level order book at 10:30 SAST on 4 September 2013. Bars are positioned at the price level, with height equal to resting volume."
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+snaps = {}
+for ax, ric in zip(axes, RICS):
+    snaps[ric] = of.load_order_book_snapshot(PATHS.merged_sorted, ric, f"{DAY} 10:30:00")
+    of.plot_order_book_depth(snaps[ric], ric, ax=ax)
+fig.tight_layout()
+plt.show()
+depth_ratio = {ric: s.loc[s.side == "bid", "size"].sum() / s.loc[s.side == "ask", "size"].sum() for ric, s in snaps.items()}
+```
+
+A depth snapshot shows how much liquidity sits behind the best price, and so how far a large order would move the price. At this moment the total bid volume over ten levels is `{python} f"{depth_ratio['AGLJ.J']:.2f}"` times the ask volume for AGLJ.J and `{python} f"{depth_ratio['GRTJ.J']:.2f}"` times for GRTJ.J. GRTJ.J's book is concentrated in fewer, much larger levels.
+
+## Persistence of order flow
+
+Let $\varepsilon_i \in \{-1, +1\}$ be the sign of the $i$-th trade. If order flow were unpredictable, the signs would be uncorrelated. Its sample autocorrelation
+$$
+\hat\rho(\ell) = \frac{\sum_{i=1}^{n-\ell}(\varepsilon_i - \bar\varepsilon)(\varepsilon_{i+\ell} - \bar\varepsilon)}{\sum_{i=1}^{n}(\varepsilon_i - \bar\varepsilon)^2}
+$$
+is computed by FFT in $O(n \log n)$ for $\ell$ up to 1,000. Under independence, $\hat\rho(\ell)$ is approximately $N(0, 1/n)$, which gives the band $\pm 1.96/\sqrt{n}$.
+
+```{python}
+#| label: fig-sign-acf
+#| fig-cap: "Autocorrelation of trade signs (continuous session), log-scaled lag axis."
+fig, axes = plt.subplots(2, 1, figsize=(10, 7))
+acfs, gamma = {}, {}
+for ax, ric in zip(axes, RICS):
+    acfs[ric] = a = of.compute_order_flow_acf(dfc, ric, max_lag=1000)
+    of.plot_order_flow_acf(a, ric, ax=ax)
+    sel = a[(a["lag"] <= 100) & (a["acf"] > a["bound"])]
+    gamma[ric] = -np.polyfit(np.log(sel["lag"]), np.log(sel["acf"]), 1)[0] if len(sel) > 3 else np.nan
+fig.tight_layout()
+plt.show()
+first_insig = {ric: int(a.loc[a["acf"].abs() < a["bound"], "lag"].min()) for ric, a in acfs.items()}
+```
+
+Trade signs are strongly positively autocorrelated. The lag-1 autocorrelation is `{python} f"{acfs['AGLJ.J']['acf'].iloc[0]:.2f}"` for AGLJ.J and `{python} f"{acfs['GRTJ.J']['acf'].iloc[0]:.2f}"` for GRTJ.J, and it first falls inside the white-noise band at lag `{python} first_insig['AGLJ.J']` and `{python} first_insig['GRTJ.J']` respectively. Over the significant lags up to 100, a power law $\rho(\ell) \propto \ell^{-\gamma}$ fitted by least squares on the log–log scale gives $\hat\gamma =$ `{python} f"{gamma['AGLJ.J']:.2f}"` (AGLJ.J) and `{python} f"{gamma['GRTJ.J']:.2f}"` (GRTJ.J). Slow, power-law-like decay is the signature of large orders split into many small ones and executed over time [@lillo2003master; @toth2011anomalous]. It is also why order flow has to be modelled with memory, as in Part III.
+
+## Clustering of trade arrivals
+
+Let $\tau_i = t_{i+1} - t_i$ be the time between consecutive trades of the same security on the same day. If trades arrived as a Poisson process with constant rate $\lambda$, the $\tau_i$ would be independent $\text{Exp}(\lambda)$.
+
+```{python}
+#| label: fig-tau-hist
+#| fig-cap: "Trade inter-arrival times: raw and log scale."
+#| fig-height: 7
+fig, axes = plt.subplots(2, 2, figsize=(12, 7))
+taus = {}
+for row, ric in zip(axes, RICS):
+    taus[ric] = of.compute_interarrival_times(dfc, ric)
+    of.plot_interarrival_histogram(taus[ric], ric, axes=row)
+fig.tight_layout()
+plt.show()
+zero_share = {ric: float((t == 0).mean()) for ric, t in taus.items()}
+mean_tau = {ric: float(t.mean()) for ric, t in taus.items()}
+```
+
+The mean waiting time is `{python} f"{mean_tau['AGLJ.J']:.1f}"` s for AGLJ.J and `{python} f"{mean_tau['GRTJ.J']:.1f}"` s for GRTJ.J. Many waiting times are essentially zero (`{python} f"{100 * zero_share['AGLJ.J']:.0f}%"` and `{python} f"{100 * zero_share['GRTJ.J']:.0f}%"` within the same millisecond): one aggressive order prints at several prices at once. On a log scale the distribution has two modes: bursts of activity within a second, and quiet spells of tens of seconds to minutes.
+
+```{python}
+#| label: fig-tau-qq
+#| fig-cap: "Quantiles of inter-arrival times against an exponential distribution with the same mean."
+fig, axes = plt.subplots(1, 2, figsize=(11, 5))
+for ax, ric in zip(axes, RICS):
+    of.plot_interarrival_qq_exponential(taus[ric], ric, ax=ax)
+fig.tight_layout()
+plt.show()
+```
+
+Both QQ-plots bend above the line in the upper tail: long waits are far longer than an exponential with the same mean allows. This is evidence against a memoryless Poisson process.
+
+### A power-law tail
+
+For the tail, a continuous power law $p(x) = \frac{\alpha - 1}{x_{\min}}\left(\frac{x}{x_{\min}}\right)^{-\alpha}$ for $x \ge x_{\min}$ is fitted by maximum likelihood [@clauset2009power]:
+$$
+\hat\alpha = 1 + n\left[\sum_{i:\, x_i \ge x_{\min}} \ln\frac{x_i}{x_{\min}}\right]^{-1},
+$$
+with $x_{\min}$ chosen to minimise the Kolmogorov–Smirnov distance between the empirical and fitted tail distributions. Starting the fit at the smallest observation instead would mix the burst regime into the tail estimate and bias $\hat\alpha$ towards 1.
+
+```{python}
+#| label: fig-tau-pl
+#| fig-cap: "Complementary CDF of inter-arrival times (log–log) with the maximum-likelihood power-law tail."
+fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+pl = {}
+for ax, ric in zip(axes, RICS):
+    pl[ric] = of.plot_interarrival_power_law_ccdf(taus[ric], ric, ax=ax)
+fig.tight_layout()
+plt.show()
+pl_naive = {ric: of.fit_power_law(taus[ric], "min")["alpha"] for ric in RICS}
+```
+
+```{python}
+#| output: asis
+show_source(of.fit_power_law)
+```
+
+The fitted tail exponents are $\hat\alpha =$ `{python} f"{pl['AGLJ.J']['alpha']:.2f}"` for AGLJ.J ($x_{\min} =$ `{python} f"{pl['AGLJ.J']['xmin']:.0f}"` s, `{python} f"{pl['AGLJ.J']['n_tail']:,}"` waits in the tail) and `{python} f"{pl['GRTJ.J']['alpha']:.2f}"` for GRTJ.J ($x_{\min} =$ `{python} f"{pl['GRTJ.J']['xmin']:.0f}"` s). Starting at the smallest positive wait gives the misleading `{python} f"{pl_naive['AGLJ.J']:.2f}"` and `{python} f"{pl_naive['GRTJ.J']:.2f}"`. A tail exponent below 3 would mean that a pure power law has infinite variance.
+
+### Memory in waiting times
+
+```{python}
+#| label: fig-tau-acf
+#| fig-cap: "Autocorrelation of inter-arrival times."
+fig, axes = plt.subplots(2, 1, figsize=(10, 6))
+tau_acf = {}
+for ax, ric in zip(axes, RICS):
+    tau_acf[ric] = a = of.compute_interarrival_acf(dfc, ric, max_lag=100)
+    of.plot_interarrival_acf(a, ric, ax=ax)
+fig.tight_layout()
+plt.show()
+n_sig = {ric: int((a["acf"] > a["bound"]).sum()) for ric, a in tau_acf.items()}
+```
+
+Waiting times are positively autocorrelated: `{python} n_sig['AGLJ.J']` of the first 100 lags exceed the 95% band for AGLJ.J, and `{python} n_sig['GRTJ.J']` for GRTJ.J. Short waits follow short waits and long waits follow long waits, so trading intensity itself clusters in time. A heavy-tailed marginal distribution together with positive serial dependence is what a self-exciting point process produces. Part III fits such a process.
+
+## Extension: do larger trades pay more?
+
+If some traders are better informed, liquidity providers lose to them on average and protect themselves by charging more to trades that are more likely to be informed. Large trades are more likely to be informed [@easley1987price]. Two measures, both oriented as a cost to the trader who initiates the trade, are tracked by trade size. With $\varepsilon_i$ the trade sign, $p_i$ the trade price, $m_i$ the prevailing mid-price and $\Delta m_i$ the change in the mid-price across the trade:
+$$
+\text{slippage}_i = \varepsilon_i\,(p_i - m_i), \qquad \text{impact}_i = \varepsilon_i\, \Delta m_i .
+$$
+Slippage is the immediate cost of execution relative to fair value: half the spread for a small trade, more for an order that walks the book. Impact is the revision of the fair value itself, which reflects the information the market infers from the trade. Trades are grouped into 20 logarithmically spaced bins of normalised volume $\tilde v \in [10^{-3}, 10]$, as in @jericevich2020comparing, separately for buys and sells.
+
+```{python}
+#| label: fig-adverse
+#| fig-cap: "Average slippage (left, ZAc) and signed price impact (right, log mid-price change) by normalised-volume bucket."
+#| fig-height: 8
+fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+buckets = {}
+for row, ric in zip(axes, RICS):
+    buckets[ric] = b = asa.compute_volume_buckets(dfc, ric=ric, n_bins=20)
+    asa.plot_cost_vs_bucket(b, ric=ric, y_col="avg_slippage_cost", ax=row[0])
+    asa.plot_cost_vs_bucket(b, ric=ric, y_col="avg_price_impact", ax=row[1])
+fig.tight_layout()
+plt.show()
+
+
+def size_slope(b, col, min_trades=20):
+    """OLS slope of a bucket average on log10(normalised volume), weighting
+    each bucket by its number of trades (sparse buckets count for less)."""
+    b = b[b["n_trades"] >= min_trades]
+    x = np.log10(b["avg_normalised_volume"])
+    return float(np.polyfit(x, b[col], 1, w=np.sqrt(b["n_trades"]))[0])
+
+
+slopes = {ric: {c: size_slope(buckets[ric], c) for c in ("avg_slippage_cost", "avg_price_impact")} for ric in RICS}
+small = {ric: float(buckets[ric].loc[buckets[ric]["avg_normalised_volume"] < 0.1, "avg_slippage_cost"].mean()) for ric in RICS}
+```
+
+```{python}
+#| label: fig-vwap-bucket
+#| fig-cap: "AGLJ.J: volume-weighted average execution price against the average pre-trade mid-price, by size bucket."
+_ = asa.plot_vwap_vs_bucket(buckets["AGLJ.J"], ric="AGLJ.J")
+plt.tight_layout()
+plt.show()
+```
+
+For small trades the slippage is roughly half the spread: on average `{python} f"{small['AGLJ.J']:.1f}"` c for AGLJ.J and `{python} f"{small['GRTJ.J']:.1f}"` c for GRTJ.J for trades below a tenth of the daily average size. A regression of the bucket averages on $\log_{10}\tilde v$, weighted by the number of trades, gives the change per tenfold increase in size. Slippage changes by `{python} f"{slopes['AGLJ.J']['avg_slippage_cost']:+.2f}"` c (AGLJ.J) and `{python} f"{slopes['GRTJ.J']['avg_slippage_cost']:+.2f}"` c (GRTJ.J), and the price impact, a log change, by `{python} f"{1e4 * slopes['AGLJ.J']['avg_price_impact']:+.2f}"` and `{python} f"{1e4 * slopes['GRTJ.J']['avg_price_impact']:+.2f}"` basis points. At the level of individual prints, then, there is little sign that larger trades pay more. Slippage does not rise with size: large prints mostly execute at or inside the touch. Impact rises only slightly. This does not mean there is no adverse selection. The decomposition of @glosten1988estimating separates the spread into an order-processing component and an adverse-selection component, the permanent impact. Part II measures that decomposition properly, with the mid-price a minute after each trade rather than at the next event (@sec-costs). Part II also finds that single-trade impact barely depends on size (@sec-impact): large traders split their orders, so the size of a single print says little about the information behind it.
+
+```{python}
+#| include: false
+from jsemicro.reporting import record
+record(sign_acf1={r: float(acfs[r]["acf"].iloc[0]) for r in RICS}, sign_gamma=gamma,
+       tau_alpha={r: float(pl[r]["alpha"]) for r in RICS}, tau_xmin={r: float(pl[r]["xmin"]) for r in RICS},
+       tau_acf_sig=n_sig, slippage_slope={r: slopes[r]["avg_slippage_cost"] for r in RICS},
+       impact_slope_a1={r: slopes[r]["avg_price_impact"] for r in RICS})
+```

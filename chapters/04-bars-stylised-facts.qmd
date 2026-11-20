@@ -1,0 +1,418 @@
+# Bars, candlesticks and stylised facts {#sec-bars}
+
+{{< include _part2-setup.qmd >}}
+
+```{python}
+#| include: false
+inside = {}
+for _ric in RICS:
+    _t = trades[trades["ric"] == _ric].sort_values("ts")
+    _q = md[md["ric"] == _ric].sort_values("ts")[["ts", "bid", "ask"]]
+    _m = pd.merge_asof(_t, _q, on="ts", allow_exact_matches=False)
+    inside[_ric] = float(((_m["price"] >= _m["bid"]) & (_m["price"] <= _m["ask"])).mean())
+```
+
+## Data and set-up
+
+This part builds on the data of Part I (@sec-pipeline) for Anglo American (AGLJ.J) and Growthpoint Properties (GRTJ.J) on the JSE, 1 September – 1 October 2013, with one change of design. Following feedback on Part I, the flattened Transactions feed (`AGL_GRT_TX_trimmed.csv`) and the flattened Market Depth feed (`AGL_GRT_MD_flat.parquet`) are **not** row-merged: the two feeds use different timestamp and `SEQNUM` conventions. Every analysis below reads from exactly one feed. Where a quantity genuinely needs both (e.g. the mid-price prevailing at a trade), only the one or two required columns are attached with a timestamp-ordered `merge_asof`.
+
+Both feeds were built from the raw exports with the appropriate time conversion and checked against them: trade and quote counts per hour match the raw files exactly, and `{python} f"{inside['AGLJ.J']:.0%}"` (AGLJ.J) and `{python} f"{inside['GRTJ.J']:.0%}"` (GRTJ.J) of trades print at or inside the prevailing bid–ask.
+
+The analysis uses the continuous session, 09:10–16:50 SAST, on weekdays; this excludes the opening and closing auctions and one reported trade stamped on a Saturday. Trades are signed against the depth feed's own quotes with the Lee–Ready rule [@lee1991inferring]: a trade above the mid of the last quote before it is buyer-initiated, one below is seller-initiated, and trades at the mid are signed by the tick test. The quote rule signs `{python} f"{100 * sign_report['quote_rule_share']:.1f}%"` of trades and the tick test the rest.
+
+```{python}
+#| label: tbl-data-summary
+#| tbl-cap: "Sample coverage by security. Times are medians across days, in SAST."
+#| output: asis
+rows = []
+for ric in RICS:
+    tr = trades[trades["ric"] == ric]
+    q = md[md["ric"] == ric]
+    m_tr = sast_minutes(tr["ts"])
+    m_q = sast_minutes(q["ts"])
+    rows.append({
+        "Security": ric,
+        "Trades": f"{len(tr):,}",
+        "Trade days": tr["date"].nunique(),
+        "Unsigned trades (%)": round(100 * tr["trade_sign"].isna().mean(), 1),
+        "First trade": hhmm(m_tr.groupby(tr["date"]).min().median()),
+        "Last trade": hhmm(m_tr.groupby(tr["date"]).max().median()),
+        "Quote updates": f"{len(q):,}",
+        "Quote days": q["date"].nunique(),
+        "Last quote": hhmm(m_q.groupby(q["date"]).max().median()),
+    })
+show_table(pd.DataFrame(rows))
+```
+
+The transaction feed holds `{python} f"{n_trades:,}"` trades over `{python} n_trade_days` days and the depth feed `{python} f"{n_quotes:,}"` quote updates over `{python} n_quote_days` days; `{python} n_overlap_days` days are present in both. The single-day illustrations below use `{python} EXAMPLE_DAY_STR`, the day with the median AGLJ.J trade count (`{python} f"{EXAMPLE_DAY_TRADES:,}"` trades).
+
+## Candlestick Plots
+
+A candlestick gives a compact summary of how the transaction price behaved over a fixed interval of calendar time, through the interval's Open, High, Low, Close and Volume (OHLCV). It answers one question: "What did the transaction price do during this interval?" Over that interval the stock is then described as bullish or bearish.
+
+@fig-candle-zoom zooms in on two consecutive 10-minute AGLJ.J bars from the example day, the 10:10 and 10:20 bars of @fig-candles-tx, with the price still on the y-axis. The body of a candle runs from the Open to the Close. The thin lines above and below it are the wicks, which extend to the High and the Low. If there is no lower wick, the bottom of the body is also the Low; if there is no upper wick, the top of the body is also the High. If the Close is above the Open ($C > O$), the price rose over the interval and the bar is bullish (green); if $C < O$, the price fell and the bar is bearish (red).
+
+```{python}
+#| label: fig-candle-zoom
+#| fig-cap: "Anatomy of a candlestick: the AGLJ.J 10:10 and 10:20 transaction-price bars on the example day."
+#| fig-height: 5.5
+_tx_day = trades[(trades["ric"] == "AGLJ.J") & (trades["date"] == EXAMPLE_DAY)]
+_bars = bc.make_ohlcv(_tx_day, "price", "volume", "10min")
+zoom_bars = _bars[_bars.index.strftime("%H:%M").isin(["10:10", "10:20"])]
+zoom_vals = [{k: f"{v:,.0f}" for k, v in row.items()} for _, row in zoom_bars.iterrows()]
+
+fig, ax = plt.subplots(figsize=(9, 5.5))
+width, xs = 0.3, [0.0, 1.6]
+span = zoom_bars["high"].max() - zoom_bars["low"].min()
+gap = 0.06 * span                      # minimum vertical spacing between labels
+
+for x, (t, b) in zip(xs, zoom_bars.iterrows()):
+    bull = b["close"] > b["open"]
+    colour = "tab:green" if bull else "tab:red"
+    top, bottom = max(b["open"], b["close"]), min(b["open"], b["close"])
+    _ = ax.plot([x, x], [b["low"], b["high"]], color=colour, linewidth=1.5, zorder=1)
+    _ = ax.add_patch(plt.Rectangle((x - width / 2, bottom), width, top - bottom,
+                               facecolor=colour, edgecolor=colour, zorder=2))
+
+    # Labels: first bar on its left, second bar on its right.
+    side = -1 if x == xs[0] else 1
+    labels = []                         # (price, text)
+    if b["high"] > top:
+        labels.append((b["high"], f"High {b['high']:,.0f}"))
+        labels.append((top, f"{'Close' if bull else 'Open'} {top:,.0f}"))
+    else:
+        labels.append((top, f"{'Close' if bull else 'Open'} = High {top:,.0f}\n(no upper wick)"))
+    if b["low"] < bottom:
+        labels.append((bottom, f"{'Open' if bull else 'Close'} {bottom:,.0f}"))
+        labels.append((b["low"], f"Low {b['low']:,.0f}"))
+    else:
+        labels.append((bottom, f"{'Open' if bull else 'Close'} = Low {bottom:,.0f}\n(no lower wick)"))
+    # spread labels downward so none overlap
+    ys = []
+    for price, _ in labels:
+        ys.append(min(price, ys[-1] - gap) if ys else price)
+    for (price, text), y in zip(labels, ys):
+        _ = ax.annotate(text, xy=(x + side * width / 2, price), xytext=(x + side * 0.45, y),
+                    ha="right" if side < 0 else "left", va="center", fontsize=8.5,
+                    arrowprops=dict(arrowstyle="-", color="0.4", linewidth=0.7))
+
+    if b["high"] > top:
+        _ = ax.text(x + 0.04, (b["high"] + top) / 2, "upper wick", fontsize=8, color="0.3", va="center")
+    if b["low"] < bottom:
+        _ = ax.text(x + 0.04, b["low"] - 0.02 * span, f"lower wick ({bottom - b['low']:,.0f} c)",
+                fontsize=8, color="0.3", va="top")
+    _ = ax.text(x, b["high"] + 0.08 * span, ("Bullish: C > O" if bull else "Bearish: C < O"),
+            ha="center", fontsize=10, fontweight="bold", color=colour)
+
+_ = ax.set_xticks(xs)
+_ = ax.set_xticklabels([f"{t:%H:%M}–{t + pd.Timedelta('10min'):%H:%M}\nvolume {v:,.0f} shares"
+                    for t, v in zoom_bars["volume"].items()])
+_ = ax.set_xlim(xs[0] - 1.0, xs[-1] + 1.0)
+_ = ax.set_ylim(zoom_bars["low"].min() - 0.25 * span, zoom_bars["high"].max() + 0.15 * span)
+ax.ticklabel_format(axis="y", useOffset=False, style="plain")
+_ = ax.set_ylabel("Price (ZAc)")
+_ = ax.set_xlabel("10-minute bar (SAST)")
+_ = ax.set_title(f"AGLJ.J {EXAMPLE_DAY_STR}: the 10:10 and 10:20 bars, zoomed in")
+_ = ax.grid(axis="y", alpha=0.3)
+fig.tight_layout()
+plt.show()
+```
+
+```{python}
+#| include: false
+def zb(i, col):
+    return zoom_vals[i - 1][col]
+```
+
+The 10:10 bar is bearish. It opened at `{python} zb(1, "open")` ZAc, traded as high as `{python} zb(1, "high")`, and closed at `{python} zb(1, "close")`, just above its low of `{python} zb(1, "low")`. The long upper wick shows that buyers briefly pushed the price up but could not hold it. The 10:20 bar is bullish and has no wicks at all: it opened at its low of `{python} zb(2, "open")` and closed at its high of `{python} zb(2, "close")`, recovering most of the previous bar's fall.
+
+### Bar data
+
+The four OHLCV tables behind the candlestick plots are saved to `out/candlestick_data/` under the data root. The first and last five 10-minute AGLJ.J transaction-price bars are shown in @tbl-ohlcv-agl.
+
+```{python}
+#| include: false
+CANDLE_DATA_DIR = PATHS.out_dir / "candlestick_data"
+CANDLE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+# Built here (not taken from the candle chunks below) because this section
+# comes first; the candle chunks rebuild the same bars when they plot them.
+def _day_slice(df, ric):
+    return df[(df["ric"] == ric) & (df["date"] == EXAMPLE_DAY)]
+ohlcv_agl_tx = bc.make_ohlcv(_day_slice(trades, "AGLJ.J"), "price", "volume", "10min")
+ohlcv_grt_tx = bc.make_ohlcv(_day_slice(trades, "GRTJ.J"), "price", "volume", "10min")
+ohlcv_agl_md = bc.make_ohlcv(bc.clean_quotes(_day_slice(md, "AGLJ.J")), "mid", None, "10min")
+ohlcv_grt_md = bc.make_ohlcv(bc.clean_quotes(_day_slice(md, "GRTJ.J")), "mid", None, "10min")
+ohlcv_agl_tx.to_csv(CANDLE_DATA_DIR / f"AGLJ.J_{EXAMPLE_DAY_STR}_tx_ohlcv_10min.csv")
+ohlcv_grt_tx.to_csv(CANDLE_DATA_DIR / f"GRTJ.J_{EXAMPLE_DAY_STR}_tx_ohlcv_10min.csv")
+ohlcv_agl_md.to_csv(CANDLE_DATA_DIR / f"AGLJ.J_{EXAMPLE_DAY_STR}_md_ohlcv_10min.csv")
+ohlcv_grt_md.to_csv(CANDLE_DATA_DIR / f"GRTJ.J_{EXAMPLE_DAY_STR}_md_ohlcv_10min.csv")
+```
+
+```{python}
+#| label: tbl-ohlcv-agl
+#| tbl-cap: "AGLJ.J 10-minute transaction-price bars, example day: first and last five bars (bar start time, SAST; prices in ZAc)."
+#| output: asis
+show_table(pd.concat([ohlcv_agl_tx.head(), ohlcv_agl_tx.tail()]), index=True, floatfmt=",.0f")
+```
+
+`bar_construction.py` builds OHLCV bars from the transaction-price series (TX feed) and from the mid-price series (MD feed) independently, together with a VWAP overlay for the former and a micro-price overlay for the latter.
+
+### Transaction-price candles with VWAP overlay
+
+```{python}
+#| label: fig-candles-tx
+#| fig-cap: "10-minute transaction-price candles with 10-minute VWAP, example day."
+#| fig-height: 8
+fig, axes = plt.subplots(2, 1, figsize=(10, 8))
+ohlcv_agl_tx, vwap_agl_tx = bc.plot_tx_candles_with_vwap(trades, ric="AGLJ.J", day=EXAMPLE_DAY, ax=axes[0], freq="10min")
+ohlcv_grt_tx, vwap_grt_tx = bc.plot_tx_candles_with_vwap(trades, ric="GRTJ.J", day=EXAMPLE_DAY, ax=axes[1], freq="10min")
+for ax in axes:
+    tidy_time_axis(ax)
+fig.tight_layout()
+plt.show()
+```
+
+The 10-minute VWAP necessarily lies inside each bar's high–low range, and for most bars it sits inside or very close to the candle body, so within-bar prices are not systematically drifting away from where volume traded. On the example day AGLJ.J fell from about 25,500c at the open to about 25,230c by 10:20, recovered to around 25,480c by 11:10, drifted lower through midday and sold off sharply after 16:00 to close near 25,130c: a range of roughly 440c, or 1.7% of price. GRTJ.J moved within a 29c range (about 1.2%), rising from about 2,440c to 2,460c in the first half hour and trading sideways thereafter. GRTJ.J's candles are more often flat or single-tick, the signature of thinner trading and of a 1c tick that is large relative to its price.
+
+The execution-cost problem of @bertsimas1998optimal is built directly on a discrete sequence of prices and volumes $(p_t, v_t)$, which is exactly what the OHLCV and VWAP bars represent.
+
+### Mid-price candles with micro-price overlay
+
+```{python}
+#| label: fig-candles-md
+#| fig-cap: "10-minute mid-price candles with 10-minute micro-price, example day."
+#| fig-height: 8
+fig, axes = plt.subplots(2, 1, figsize=(10, 8))
+ohlcv_agl_md, micro_agl_md = bc.plot_mid_candles_with_microprice(md, ric="AGLJ.J", day=EXAMPLE_DAY, ax=axes[0], freq="10min")
+ohlcv_grt_md, micro_grt_md = bc.plot_mid_candles_with_microprice(md, ric="GRTJ.J", day=EXAMPLE_DAY, ax=axes[1], freq="10min")
+for ax in axes:
+    tidy_time_axis(ax)
+fig.tight_layout()
+plt.show()
+```
+
+The micro-price used here weights each side of the touch by the *opposite* side's resting size,
+$$
+p^{\text{micro}} = \frac{Q^{b}\,a + Q^{a}\,b}{Q^{b} + Q^{a}},
+$$
+where $a, b$ are the best ask and bid and $Q^{a}, Q^{b}$ their sizes. It always lies within $[b, a]$, equals the mid when the two sizes are equal, and leans towards the side with *less* depth, which is the side more likely to be cleared next. Quote updates with a zero, crossed or one-sided touch are removed before the mid and micro-price bars are built (`bar_construction.clean_quotes`); without this step, a one-sided book after the last trade produced a spurious drop in the final GRTJ.J micro-price bar. With valid quotes only, the micro-price tracks the mid closely through the session for both names.
+
+
+### Zoomed-in views (1-minute resolution)
+
+The 10-minute candles compress intrabar detail. To see individual bullish (green, close $\ge$ open) and bearish (red, close $<$ open) candles and how activity changes through the session, the transaction-price series is re-plotted at 1-minute resolution over three one-hour windows: morning (09:10–10:10 SAST, from the start of trading), midday (12:00–13:00) and afternoon (15:30–16:30). Each panel's x-axis is fixed to the full window, so gaps in trading are visible as empty space.
+
+```{python}
+#| include: false
+def window_pair(start, end):
+    fig, axes = plt.subplots(2, 1, figsize=(10, 7))
+    for ax, ric in zip(axes, RICS):
+        bc.plot_tx_candles_with_vwap_window(trades, ric=ric, day=EXAMPLE_DAY, ax=ax,
+                                            start_time=start, end_time=end, freq="1min")
+        tidy_time_axis(ax, start, end, EXAMPLE_DAY_STR)
+    fig.tight_layout()
+    plt.show()
+```
+
+```{python}
+#| label: fig-zoom-morning
+#| fig-cap: "1-minute transaction-price candles and VWAP, 09:10–10:10 SAST."
+#| fig-height: 7
+window_pair("09:10", "10:10")
+```
+
+```{python}
+#| label: fig-zoom-midday
+#| fig-cap: "1-minute transaction-price candles and VWAP, 12:00–13:00 SAST."
+#| fig-height: 7
+window_pair("12:00", "13:00")
+```
+
+```{python}
+#| label: fig-zoom-afternoon
+#| fig-cap: "1-minute transaction-price candles and VWAP, 15:30–16:30 SAST."
+#| fig-height: 7
+window_pair("15:30", "16:30")
+```
+
+For the more-liquid stock (AGLJ.J) the morning session is dominated by red bars, resulting in a decreasing price (and VWAP as a consequence) depicting that the stock is bearish after the open (ranging from 25340c to 25550c), the illiquid stock shows a bullish nature during the same interval. Both stocks start bearish midday but end the session in a bullish nature, and they both exert a bearish nature just before close.
+
+## Time-Series Stylised Facts
+
+A diffusion model with constant volatility, like the one behind the basic execution model, predicts Normal returns at any fixed sampling interval. High-frequency returns are not Normal because of how prices form: price changes come in bursts, because order arrivals cluster (the Hawkes picture) and volatility changes within the day (the U-shape of Part II). This section checks the classic stylised facts on the 1-minute VWAP series (TX feed) and the 1-minute micro-price series (MD feed). For each stock and series, `stylised_facts.py` reports four diagnostics:
+
+(i) the distribution of the log returns;
+(ii) a QQ-plot against the Normal distribution;
+(iii) the empirical tail behaviour above the 95th and below the 5th percentile, plotted as a log–log survival curve (CCDF), on which a power-law tail shows up as a straight line; and
+(iv) the autocorrelation function (ACF) of returns.
+
+Log returns $r_t = \ln P_t - \ln P_{t-1}$ are taken within each trading day only, from one non-empty 1-minute bar to the next. The overnight change from 16:49 to 09:10 is excluded: it includes news since the close and the opening auction, and in AGLJ.J it would supply 8 of the 10 largest returns. Both series are averages within the minute: the VWAP is volume-weighted over the bar's trades, and the micro-price is time-weighted over the bar's quote updates.
+
+```{python}
+#| include: false
+vwap_1m, micro_1m = {}, {}
+for ric in RICS:
+    vwap_1m[ric] = bc.make_vwap_bars(trades[trades["ric"] == ric], "1min")
+    micro_1m[ric] = bc.make_microprice_bars(md[md["ric"] == ric], "1min")
+
+sf_returns = {}
+
+def stylised_panel(series, ric, label):
+    fig = plt.figure(figsize=(10, 7.5))
+    gs = fig.add_gridspec(2, 4)
+    ax_dist = fig.add_subplot(gs[0, :2])
+    ax_qq = fig.add_subplot(gs[0, 2:])
+    ax_rt = fig.add_subplot(gs[1, 0])
+    ax_lt = fig.add_subplot(gs[1, 1])
+    ax_acf = fig.add_subplot(gs[1, 2:])
+    sf_returns[(ric, label)] = sf.run_all(series, ric, label,
+                                          (fig, ax_dist), (fig, ax_qq),
+                                          (fig, np.array([ax_rt, ax_lt])), (fig, ax_acf))
+    for ax in (ax_rt, ax_lt):
+        ax.xaxis.set_minor_formatter(mticker.NullFormatter())
+    fig.tight_layout()
+    plt.show()
+
+# Point-in-time 1-minute prices (last trade, last micro-price in each bar), used
+# only to separate bid-ask bounce from the averaging effect in the lag-1 ACF.
+def _last_in_minute(df, col):
+    s = df.set_index(df["ts"].dt.tz_convert(data_io.TZ_LOCAL))[col].sort_index()
+    return s.resample("1min").last().dropna()
+
+sf_point_acf1 = {}
+for ric in RICS:
+    _q = bc.clean_quotes(md[md["ric"] == ric])
+    sf_point_acf1[(ric, "VWAP")] = float(sf.acf(sf.compute_log_returns(
+        _last_in_minute(trades[trades["ric"] == ric], "price")), 1)[0])
+    sf_point_acf1[(ric, "microprice")] = float(sf.acf(sf.compute_log_returns(
+        _last_in_minute(_q, "micro")), 1)[0])
+```
+
+```{python}
+#| label: fig-sf-agl-vwap
+#| fig-cap: "AGLJ.J, 1-minute VWAP log returns within each day: distribution with a Normal of the same mean and standard deviation, QQ-plot, tail CCDFs with a Hill-estimated power-law slope, and ACF from lag 1 with the 95% band for white noise."
+#| fig-height: 7.5
+stylised_panel(vwap_1m["AGLJ.J"], "AGLJ.J", "VWAP")
+```
+
+```{python}
+#| label: fig-sf-agl-micro
+#| fig-cap: "AGLJ.J, 1-minute micro-price log returns within each day (panels as in @fig-sf-agl-vwap)."
+#| fig-height: 7.5
+stylised_panel(micro_1m["AGLJ.J"], "AGLJ.J", "microprice")
+```
+
+```{python}
+#| label: fig-sf-grt-vwap
+#| fig-cap: "GRTJ.J, 1-minute VWAP log returns within each day (panels as in @fig-sf-agl-vwap)."
+#| fig-height: 7.5
+stylised_panel(vwap_1m["GRTJ.J"], "GRTJ.J", "VWAP")
+```
+
+```{python}
+#| label: fig-sf-grt-micro
+#| fig-cap: "GRTJ.J, 1-minute micro-price log returns within each day (panels as in @fig-sf-agl-vwap)."
+#| fig-height: 7.5
+stylised_panel(micro_1m["GRTJ.J"], "GRTJ.J", "microprice")
+```
+
+```{python}
+#| include: false
+sf_stats = {f"{ric}|{lab}": sf.summarise_returns(r) for (ric, lab), r in sf_returns.items()}
+for (ric, lab), v in sf_point_acf1.items():
+    sf_stats[f"{ric}|{lab}"]["acf1_point"] = v
+# The largest within-day AGLJ.J VWAP return, and the largest trade in that minute.
+_r = sf_returns[("AGLJ.J", "VWAP")]
+_t_end = _r.abs().idxmax()                                    # bar start, SAST
+_agl = trades[trades["ric"] == "AGLJ.J"]
+_loc = _agl["ts"].dt.tz_convert(data_io.TZ_LOCAL)
+_in_bar = _agl[(_loc >= _t_end) & (_loc < _t_end + pd.Timedelta("1min"))]
+sf_block = _in_bar.loc[_in_bar["volume"].idxmax()]
+_prev = _agl[_agl["ts"] < sf_block["ts"]]["price"].iloc[-1]       # last trade before the block
+_bt = sf_block["ts"].tz_convert(data_io.TZ_LOCAL)
+sf_block = {"time": f"{_bt.day} {_bt:%B} at {_bt:%H:%M}", "return_pct": f"{100 * _r.loc[_t_end]:.1f}",
+            "volume": f"{sf_block['volume']:,.0f}", "price": f"{sf_block['price']:,.0f}",
+            "prev": f"{_prev:,.0f}", "gap_pct": f"{100 * (sf_block['price'] / _prev - 1):.1f}"}
+```
+
+```{python}
+#| label: tbl-sf
+#| tbl-cap: "Stylised facts of 1-minute log returns within each day. α is the Hill estimate of the power-law tail exponent from the largest 5% of returns in each tail; the 95% band for the ACF of white noise is ±1.96/√n. The last column is the lag-1 ACF of point-in-time prices (each minute's last trade price, or last micro-price), which involve no averaging."
+#| output: asis
+show_table(pd.DataFrame([{
+    "Series": f"{ric} {'VWAP' if lab == 'VWAP' else 'micro-price'}",
+    "n": f"{s['n']:,}",
+    "s.d. (bps)": s["sd_bps"],
+    "Zero returns": f"{100 * s['zero_share']:.1f}%",
+    "Excess kurtosis": s["exkurt"],
+    "Jarque–Bera p": "<0.001" if s["jb_p"] < 0.001 else f"{s['jb_p']:.3f}",
+    "α right": s["alpha_right"],
+    "α left": s["alpha_left"],
+    "ACF lag 1": s["acf1"],
+    "ACF lag 2": s["acf2"],
+    "±band": s["band"],
+    "Lag-1 ACF, point-in-time price": s["acf1_point"],
+} for (ric, lab), s in ((tuple(k.split("|")), v) for k, v in sf_stats.items())]), floatfmt=".2f")
+```
+
+```{python}
+#| include: false
+def sfs(ser, key, fmt="%.2f"):
+    return fmt % sf_stats[ser][key]
+
+def sfa(ser):
+    return "%.1f" % sf_stats[ser]["alpha_right"]
+```
+
+**Distribution and QQ-plot.** A Normal distribution whose volatility keeps changing, mixed over a day, has fatter tails and a taller, narrower peak than a single Normal. That shape is called leptokurtic, meaning excess kurtosis above 0. All four series are leptokurtic, and the Jarque–Bera test rejects normality for each (@tbl-sf). In every histogram the sample has more mass at the centre and in the tails than the Normal with the same standard deviation, and every QQ-plot follows the Normal line in the middle and bends away from it at both ends. Excess kurtosis ranges from `{python} sfs("AGLJ.J|microprice", "exkurt", "%.1f")` for the AGLJ.J micro-price to `{python} sfs("AGLJ.J|VWAP", "exkurt", "%.0f")` for the AGLJ.J VWAP. The AGLJ.J VWAP value comes from a handful of extreme minutes. The most extreme pair of within-day returns comes from a single reported trade: `{python} sf_block['volume']` shares at `{python} sf_block['price']`c on `{python} sf_block['time']`, `{python} sf_block['gap_pct']`% away from the previous trade at `{python} sf_block['prev']`c. It is almost certainly a negotiated trade reported to the exchange rather than an order-book trade, and it moved that minute's VWAP by `{python} sf_block['return_pct']`% and the next minute's back again. GRTJ.J shows a second effect. Its 1c tick is large relative to its price, so `{python} f"{100 * sf_stats['GRTJ.J|VWAP']['zero_share']:.0f}%"` of its 1-minute VWAP returns are exactly zero, which puts a spike at zero in the histogram and a flat step in the middle of the QQ-plot.
+
+**Tails.** The survival function is $P(|r| \ge x)$. If the tail follows a power law, $P(|r| \ge x) \propto x^{-\alpha}$, then $\log P = -\alpha \log x + c$, a straight line with slope $-\alpha$ on log–log axes; a Normal tail instead falls away ever more steeply. The tail CCDFs are close to straight over the range observed, and the Hill estimates of $\alpha$ lie between about 3 and 4 in every series (`{python} sfa("AGLJ.J|VWAP")` for the AGLJ.J VWAP right tail). This is consistent with the "inverse cubic law" found for returns across many markets [@gopikrishnan1999scaling]. An exponent near 3 has a useful consequence: the variance is finite, but the fourth moment is not (that would need $\alpha > 4$). Sample kurtosis therefore never settles and is dominated by the few largest returns, which is why one series shows a kurtosis near 4 and another near 50. The GRTJ.J micro-price tails bend slightly rather than lying on one line, so a single exponent describes them only roughly.
+
+**Autocorrelation.** If prices were efficient random walks, returns would be uncorrelated at every lag. At very short time scales, two microstructure effects add autocorrelation. Bid–ask bounce [@roll1984simple] makes consecutive changes in *trade* prices negatively correlated, because trades alternate between the bid and the ask while the underlying value stays put; it does not affect quote-based prices. Averaging [@working1960note] works the other way: when each bar's value is an average over the interval rather than a point-in-time price, consecutive differences of a pure random walk have a lag-1 autocorrelation of +0.25.
+
+Both effects appear in the data. The VWAP returns have a negative lag-1 ACF (`{python} sfs("AGLJ.J|VWAP", "acf1")` for AGLJ.J and `{python} sfs("GRTJ.J|VWAP", "acf1")` for GRTJ.J): bid–ask bounce outweighs the averaging. Each minute's last trade price, which is not averaged, shows the bounce more strongly (`{python} sfs("AGLJ.J|VWAP", "acf1_point")` and `{python} sfs("GRTJ.J|VWAP", "acf1_point")`). The micro-price is built from quotes, so it cannot bounce, and its lag-1 ACF is positive (`{python} sfs("AGLJ.J|microprice", "acf1")` and `{python} sfs("GRTJ.J|microprice", "acf1")`): this is the averaging effect. Each minute's last micro-price, with no averaging, has only a small negative lag-1 ACF (`{python} sfs("AGLJ.J|microprice", "acf1_point")` and `{python} sfs("GRTJ.J|microprice", "acf1_point")`), the closest of these series to an efficient price. In every series the correlation is essentially gone after the first lag: no lag-2 autocorrelation exceeds `{python} f"{max(abs(x['acf2']) for x in sf_stats.values()):.2f}"` in absolute value. Microstructure effects therefore dominate only at the shortest horizons, and price information dominates beyond a minute or two.
+
+## Data schema
+
+The tables below describe the two analysis tables as loaded: column, type and range. The rows themselves are licensed data and are not reproduced.
+
+```{python}
+#| include: false
+def schema(df):
+    rows = []
+    for c in df.columns:
+        x = df[c]
+        if pd.api.types.is_datetime64_any_dtype(x):
+            x = x.dt.tz_convert(SAST)
+            lo, hi = x.min().strftime("%Y-%m-%d %H:%M"), x.max().strftime("%Y-%m-%d %H:%M")
+        elif pd.api.types.is_numeric_dtype(x):
+            lo, hi = f"{x.min():,.4g}", f"{x.max():,.4g}"
+        else:
+            vals = sorted(map(str, x.dropna().unique()))
+            lo, hi = vals[0], vals[-1]
+        rows.append({"column": f"`{c}`", "type": str(df[c].dtype), "non-missing": f"{x.notna().mean():.1%}",
+                     "min": lo, "max": hi})
+    return pd.DataFrame(rows)
+```
+
+```{python}
+#| label: tbl-tx-schema
+#| tbl-cap: "The trade table: one row per continuous-session trade print (timestamps in SAST)."
+#| output: asis
+show_table(schema(trades))
+```
+
+```{python}
+#| label: tbl-md-schema
+#| tbl-cap: "The quote table: one row per change of the top of book (timestamps in SAST)."
+#| output: asis
+show_table(schema(md))
+```
+
+```{python}
+#| include: false
+from jsemicro.reporting import record
+record(sf_stats={k: {kk: float(vv) for kk, vv in v.items() if isinstance(vv, (int, float, np.floating))}
+                 for k, v in sf_stats.items()},
+       quote_rule_share=float(sign_report["quote_rule_share"]), n_trades=n_trades, n_quotes=n_quotes)
+```

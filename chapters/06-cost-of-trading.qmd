@@ -1,0 +1,338 @@
+# The cost of trading {#sec-costs}
+
+{{< include _part2-setup.qmd >}}
+
+Trading cost can be measured from two perspectives. The **quoted spread**, $QS_i = (a_i - b_i)/m_i$, is the price of immediacy posted in the book just before trade $i$: $a_i$ is the lowest price at which someone is offering to sell (what a buyer pays), $b_i$ the highest price at which someone is willing to buy (what a seller receives), and $m_i = (a_i + b_i)/2$. It is the outcome of liquidity providers' choice of how far from their reservation price to quote. The **effective spread**, $ES_i = 2D_i(p_i - m_i)/m_i$, with $D_i = +1$ for a buyer- and $-1$ for a seller-initiated trade at price $p_i$, is what the liquidity taker actually paid relative to the mid. Both are round-trip measures, so a single market order executed at the touch pays half the quoted spread relative to the mid; $QS_i/2$ is the direct cost in the expected-shortfall decomposition below.
+
+The effective spread splits exactly into what the liquidity provider keeps and what it loses to the subsequent price move:
+$$
+ES_i \;=\; \underbrace{2D_i\,\frac{p_i - m_{i+\Delta}}{m_i}}_{\text{realised spread}} \;+\; \underbrace{2D_i\,\frac{m_{i+\Delta} - m_i}{m_i}}_{\text{price impact}},
+$$
+where $m_{i+\Delta}$ is the mid-price $\Delta = 60$ seconds after the trade. The price impact is the provider's adverse-selection loss to better-informed order flow; the realised spread is the provider's compensation for supplying immediacy. In addition, `cost_of_trading.py` computes a trade-classified VPIN from the Lee–Ready trade signs and decomposes trading cost by trade size, which is compared with the square-root law.
+
+## Large Orders on One Day
+
+```{python}
+#| include: false
+_days = sorted(set(trades["date"]) & set(md["date"]))
+CASE_DAY = _days[np.random.default_rng(2013).integers(len(_days))]   # reproducible random day
+CASE_DAY_STR = f"{pd.Timestamp(CASE_DAY).day} {pd.Timestamp(CASE_DAY):%B %Y}"
+case = ct.large_order_cost_sample(trades, md, CASE_DAY, RICS, n_per_window=3, horizon="60s")
+case_sum = ct.summarise_cost_sample(case)
+cs = lambda ric, win, col: float(case_sum.query("ric == @ric and window == @win")[col].iloc[0])
+_big = case.loc[case["notional_R"].idxmax()]
+_worst = case.loc[case["provider_gain_R"].idxmin()]
+case_big = {"ric": _big["ric"], "window": _big["window"], "side": _big["side"],
+            "volume": float(_big["volume"]), "notional_m": float(_big["notional_R"] / 1e6),
+            "es": float(_big["effective_bps"]), "pi": float(_big["impact_bps"]),
+            "taker": float(_big["taker_cost_R"]), "provider": float(_big["provider_gain_R"])}
+case_worst = {"ric": _worst["ric"], "window": _worst["window"], "side": _worst["side"],
+              "time": _worst["local_time"], "pi": float(_worst["impact_bps"]),
+              "provider": float(_worst["provider_gain_R"])}
+```
+
+To introduce these measures, @tbl-case-orders follows the three largest market orders in each one-hour window (open 09:10–10:10, midday 12:00–13:00 and close 15:50–16:50 SAST) of one randomly chosen day, `{python} CASE_DAY_STR`. As in the resilience analysis, prints with the same sign within 10 ms of each other are treated as one order, and its price is the volume-weighted average of its prints. For each order the table gives the quoted spread before it, the effective spread it paid, and how that cost divided between price impact and the realised spread. It also gives the same amounts in rand: the taker's cost relative to the pre-trade mid, $D_i(p_i - m_i)\times\text{volume}$, and the providers' gain once the price had moved, $D_i(p_i - m_{i+\Delta})\times\text{volume}$.
+
+```{python}
+#| label: tbl-case-orders
+#| tbl-cap: "The three largest market orders per window on the case-study day: quoted, effective and realised spread and price impact (bps; impact and realised spread at 60 s), and the taker's cost and the providers' gain in rand."
+#| tbl-colwidths: [9,7,8,5,8,5,7,7,7,7,7,9,9]
+#| output: asis
+bps = lambda x: x.round(1).replace(-0.0, 0.0).map("{:.1f}".format)
+rand = lambda x: x.round(0).replace(-0.0, 0.0).map("{:,.0f}".format)
+show_table(pd.DataFrame({
+    "Security": case["ric"], "Window": case["window"], "Time": case["local_time"],
+    "Side": case["side"], "Volume": case["volume"].map("{:,.0f}".format),
+    "Prints": case["n_prints"], "Notional (R m)": (case["notional_R"] / 1e6).map("{:.1f}".format),
+    "Quoted": bps(case["quoted_bps"]), "Effective": bps(case["effective_bps"]),
+    "Impact": bps(case["impact_bps"]), "Realised": bps(case["realised_bps"]),
+    "Taker cost (R)": rand(case["taker_cost_R"]), "Provider gain (R)": rand(case["provider_gain_R"]),
+}))
+```
+
+The two AGLJ.J orders at 12:35:48 show how the measures behave around temporary impact. A 6,872-share sell walked the bid down five price levels, and three milliseconds later a 6,750-share ask, most likely the unfilled remainder of the same sell order, appeared one tick above the new bid and was immediately bought. The mid-price fell by about 10 bps over the next few seconds and returned exactly to its pre-trade level within a minute. The sell therefore shows zero price impact and its counterparties kept the full effective spread, while the buy, measured from the momentary one-tick quote, shows a 29 bps “impact” that is simply the reversal of the sell’s temporary impact. This is a reversal of the mid-price, not bid–ask bounce, which moves transaction prices but leaves the mid unchanged.
+
+```{python}
+#| label: tbl-case-summary
+#| tbl-cap: "Case-study day by security and window: notional-weighted spreads (bps) and total rand amounts for the three orders."
+#| output: asis
+show_table(case_sum.astype({"orders": int}).rename(columns={
+    "ric": "Security", "window": "Window", "orders": "Orders", "notional_R": "Notional (R)",
+    "quoted_bps": "Quoted", "effective_bps": "Effective", "impact_bps": "Impact",
+    "realised_bps": "Realised", "taker_cost_R": "Taker cost (R)", "provider_gain_R": "Provider gain (R)"}),
+    floatfmt=",.1f")
+```
+
+```{python}
+#| include: false
+def _num(x):
+    return isinstance(x, (int, float, np.integer, np.floating))
+
+def cs_(ric, win, col, d=0):
+    return f"{cs(ric, win, col):,.{d}f}"
+
+def csa_(ric, win, col, d=0):
+    return f"{abs(cs(ric, win, col)):,.{d}f}"
+
+def cb(k, d=0):
+    x = case_big[k]
+    return f"{x:,.{d}f}" if _num(x) else x
+
+def cw(k, d=0):
+    x = case_worst[k]
+    return f"{abs(x):,.{d}f}" if _num(x) else x
+
+def cs_rank(ric, which="max"):
+    """Window with the highest / lowest notional-weighted effective spread."""
+    wins = ["open", "midday", "close"]
+    es = [cs(ric, w, "effective_bps") for w in wins]
+    i = int(np.argmax(es)) if which == "max" else int(np.argmin(es))
+    return {"open": "the open", "midday": "midday", "close": "the close"}[wins[i]]
+```
+
+@tbl-case-summary shows how the cost of trading varied through this day. For AGLJ.J, the more liquid stock, the notional-weighted effective spread was `{python} cs_("AGLJ.J", "open", "effective_bps")` bps at the open, `{python} cs_("AGLJ.J", "midday", "effective_bps")` bps at midday and `{python} cs_("AGLJ.J", "close", "effective_bps")` bps at the close, so trading was most expensive at `{python} cs_rank("AGLJ.J", "max")` and cheapest at `{python} cs_rank("AGLJ.J", "min")`; the quoted spread followed the same pattern (`{python} cs_("AGLJ.J", "open", "quoted_bps")`, `{python} cs_("AGLJ.J", "midday", "quoted_bps")` and `{python} cs_("AGLJ.J", "close", "quoted_bps")` bps). For GRTJ.J the differences were much larger: takers paid `{python} cs_("GRTJ.J", "open", "effective_bps")` bps at the open, against `{python} cs_("GRTJ.J", "midday", "effective_bps")` bps at midday and `{python} cs_("GRTJ.J", "close", "effective_bps")` bps at the close, because its quotes were far wider after the open (`{python} cs_("GRTJ.J", "open", "quoted_bps")` bps). With three orders per window these are single-day snapshots; the systematic intraday pattern is in @fig-season-agl and @fig-season-grt.
+
+The case study shows three things that motivate the systematic measures below.
+
+First, the quoted spread is only a rough guide to what a large order pays. Orders that walk the book pay more than the quoted spread, and orders that meet hidden liquidity inside the spread pay less. For AGLJ.J the notional-weighted effective spread was close to the quoted spread in every window: `{python} cs_("AGLJ.J", "open", "effective_bps")` against `{python} cs_("AGLJ.J", "open", "quoted_bps")` bps at the open, `{python} cs_("AGLJ.J", "midday", "effective_bps")` against `{python} cs_("AGLJ.J", "midday", "quoted_bps")` at midday, and `{python} cs_("AGLJ.J", "close", "effective_bps")` against `{python} cs_("AGLJ.J", "close", "quoted_bps")` at the close. For GRTJ.J at the open, quotes were `{python} cs_("GRTJ.J", "open", "quoted_bps")` bps wide and takers paid `{python} cs_("GRTJ.J", "open", "effective_bps")` bps.
+
+Second, the cost to the taker is not the same as the gain to the provider, and the gap depends on the time of day. In quiet periods most of the effective spread was kept by liquidity providers: at the AGLJ.J close, `{python} cs_("AGLJ.J", "close", "realised_bps")` of `{python} cs_("AGLJ.J", "close", "effective_bps")` bps, and at the GRTJ.J midday, `{python} cs_("GRTJ.J", "midday", "realised_bps")` of `{python} cs_("GRTJ.J", "midday", "effective_bps")` bps. At the GRTJ.J open, by contrast, the price kept moving in the takers' direction after they traded (impact `{python} cs_("GRTJ.J", "open", "impact_bps")` bps), and providers lost R`{python} csa_("GRTJ.J", "open", "provider_gain_R")` in total while takers paid R`{python} cs_("GRTJ.J", "open", "taker_cost_R")`. This is adverse selection at its clearest: wide quotes at the open are the providers' protection against better-informed order flow, and on this day it was not enough. A single order can have the same effect: the `{python} cw("side")` in `{python} cw("ric")` at `{python} cw("time")` was followed by a `{python} cw("pi")` bps move against its counterparties, who lost R`{python} cw("provider")` on it.
+
+Third, rand amounts are dominated by size. The largest order of the day, a `{python} cb("volume")`-share `{python} cb("side")` in `{python} cb("ric")` at the `{python} cb("window")` (R`{python} cb("notional_m", 1)` million), paid `{python} cb("es")` bps, or R`{python} cb("taker")`. Because the mid-price then moved against the taker (impact `{python} cb("pi")` bps), its counterparties ended up R`{python} cb("provider")` ahead.
+
+A single day with three orders per window is an illustration, not an estimate; per-trade price impact over 60 seconds is noisy. The rest of this part therefore measures these quantities across all trades in the sample.
+
+## Effective and Quoted Spread
+
+```{python}
+#| label: fig-spreads
+#| fig-cap: "Distributions of per-trade effective and quoted spreads (bps), on common bins over the central 99% of trades; dashed lines mark the means."
+#| fig-height: 4.2
+IMPACT_HORIZON = "60s"
+tx_spreads, spread_stats = {}, {}
+fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
+for ax, ric in zip(axes, RICS):
+    tx_spreads[ric] = ct.compute_spreads(trades, md, ric, impact_horizon=IMPACT_HORIZON)
+    spread_stats[ric] = ct.plot_spread_distributions(tx_spreads[ric], ric, ax, verbose=False)
+fig.tight_layout()
+plt.show()
+```
+
+```{python}
+#| label: tbl-spreads
+#| tbl-cap: "Mean trading costs per trade, all trades (bps). Price impact and realised spread use the mid-price 60 seconds after the trade; effective spread = realised spread + price impact."
+#| output: asis
+show_table(pd.DataFrame([{
+    "Security": ric,
+    "Effective spread": v["effective_bps"], "Quoted spread": v["quoted_bps"],
+    "ES / QS": v["es_over_qs"], "Price impact": v["impact_bps"],
+    "Realised spread": v["realised_bps"],
+} for ric, v in spread_stats.items()]), floatfmt=".2f")
+```
+
+```{python}
+#| include: false
+def sp(ric, key, d=2):
+    return f"{spread_stats[ric][key]:.{d}f}"
+```
+
+The mean effective spread is `{python} sp("AGLJ.J", "effective_bps")` bps for AGLJ.J against a mean quoted spread of `{python} sp("AGLJ.J", "quoted_bps")` bps, and `{python} sp("GRTJ.J", "effective_bps")` bps for GRTJ.J against `{python} sp("GRTJ.J", "quoted_bps")` bps (@tbl-spreads), so GRTJ.J is substantially more expensive to trade in relative terms, in line with its lower liquidity. For both names the effective spread is below the quoted spread (ratios of `{python} sp("AGLJ.J", "es_over_qs")` and `{python} sp("GRTJ.J", "es_over_qs")`), meaning trades execute on average inside the posted touch. This reflects price improvement, through hidden liquidity inside the spread, as seen for many of the largest orders in the resilience analysis, and quotes that moved between the last book update and the trade print. Because trades are signed with the Lee–Ready rule against the same prevailing quote, the effective spread is non-negative by construction, so it cannot be used to check the sign classification.
+
+Across all trades, the split between the two perspectives differs markedly between the names. For AGLJ.J most of the `{python} sp("AGLJ.J", "effective_bps")` bps effective spread is price impact (`{python} sp("AGLJ.J", "impact_bps")` bps), so liquidity providers retain only `{python} sp("AGLJ.J", "realised_bps")` bps: what they earn on the spread they largely give back to better-informed order flow. For GRTJ.J the effective spread of `{python} sp("GRTJ.J", "effective_bps")` bps divides roughly evenly (`{python} sp("GRTJ.J", "impact_bps")` bps impact, `{python} sp("GRTJ.J", "realised_bps")` bps realised), consistent with providers in a thinner market being compensated more for supplying immediacy. The quoted spread also behaves as the market-maker model predicts, with wider quotes when inventory risk is higher: it is widest at the open, when intraday volatility peaks (@fig-season-agl and @fig-season-grt).
+
+## VPIN
+
+VPIN, the volume-synchronised probability of informed trading [@easley2012flow], measures how one-sided order flow is. The day's trades are taken in time order and divided into $n = 50$ buckets of equal traded volume $V$, one fiftieth of the day's volume, so the measure runs on a volume clock rather than a time clock. A trade larger than the room left in the current bucket is split across the boundary. For example, with $V = 1{,}000$ shares and 700 already in bucket $i$, a 2,200-share print puts 300 shares in bucket $i$, fills bucket $i+1$ with 1,000, and starts bucket $i+2$ with the remaining 900. Every bucket therefore holds exactly $V$, so all bucket imbalances are measured on the same scale. For bucket $\tau$,
+$$
+OI_\tau = \frac{|V^B_\tau - V^S_\tau|}{V}, \qquad \text{VPIN} = \frac{1}{n}\sum_{\tau=1}^{n} OI_\tau ,
+$$
+where $V^B_\tau$ and $V^S_\tau$ are buyer- and seller-initiated volume. This is the trade-classified variant: the buy/sell split comes from the Lee–Ready trade signs, not from the bulk-volume classification of @easley2012flow, which splits each bucket's volume probabilistically from standardised price changes. VPIN is computed here as a daily average over the 50 buckets, rather than as the rolling series over the most recent buckets used for real-time monitoring.
+
+All trades are kept, as in @easley2012flow. Splitting does not prevent a print larger than $V$ from filling a whole bucket on its own (bucket $i+1$ in the example). Such a bucket is still a valid observation, with $V^B_\tau = V$ and $V^S_\tau = 0$, but its imbalance of 1 records a single trading decision rather than a run of same-direction trades. More generally, even when buys and sells arrive at random, a bucket made up of only a few large trades will often be lopsided, so a VPIN level cannot be read in isolation. Each observed VPIN is therefore compared with a baseline that keeps the day's trades, times and sizes but randomly permutes their signs (200 permutations). This removes any persistence in order flow while keeping the trade-size distribution and the day's overall buy share; buckets filled by one print score 1 in every permutation too, so they raise the baseline as much as the observed value. As a robustness check, VPIN is also recomputed after excluding every print larger than one bucket.
+
+```{python}
+#| include: false
+def single_print_buckets(tx, n=50):
+    """Number of buckets lying entirely inside one print."""
+    v = tx.sort_values("ts", kind="mergesort")["volume"].to_numpy(dtype=float)
+    V, end = v.sum() / n, np.cumsum(v)
+    start = end - v
+    return int(sum(max(0, int(np.floor(e / V + 1e-9)) - int(np.ceil(s / V - 1e-9)))
+                   for s, e in zip(start, end)))
+
+vpin_mean, vpin_excl, vpin_attrs, vpin_base, vpin_base_ex, vpin_days = {}, {}, {}, {}, {}, {}
+for ric in RICS:
+    b_all, v_all = ct.compute_vpin(trades, ric, EXAMPLE_DAY, n_buckets=50)
+    b_ex, v_ex = ct.compute_vpin(trades, ric, EXAMPLE_DAY, n_buckets=50, exclude_oversized=True)
+    vpin_mean[ric], vpin_excl[ric] = v_all, v_ex
+    _day = trades[(trades["ric"] == ric) & (trades["date"] == EXAMPLE_DAY)]
+    vpin_attrs[ric] = {"n": b_ex.attrs["n_excluded"], "share": b_ex.attrs["excluded_volume_share"],
+                       "trades": int(len(_day)),
+                       "day_volume": float(_day["volume"].sum()),
+                       "median_trade": float(_day["volume"].median()),
+                       "trades_per_bucket": float(len(_day) / 50),
+                       "bucket_volume": float(_day["volume"].sum() / 50),
+                       "single_print_buckets": single_print_buckets(_day)}
+    vpin_base[ric] = ct.vpin_shuffled_baseline(trades, ric, EXAMPLE_DAY, n_sims=200, seed=0,
+                                               exclude_oversized=False)
+    vpin_base[ric]["ratio"] = v_all / vpin_base[ric]["mean"]
+    vpin_base_ex[ric] = ct.vpin_shuffled_baseline(trades, ric, EXAMPLE_DAY, n_sims=200, seed=0,
+                                                  exclude_oversized=True)
+    d = ct.vpin_by_day(trades, ric, overlap_days, exclude_oversized=False)
+    vpin_days[ric] = {"mean": float(d.mean()), "min": float(d.min()), "max": float(d.max())}
+```
+
+```{python}
+#| label: fig-vpin
+#| fig-cap: "Order imbalance |Buy − Sell| / V of each of the 50 volume buckets on the example day, in time order (all trades); the dashed line is the day's VPIN (the average imbalance) and the dotted red line the VPIN expected if trade signs were random (mean of 200 sign permutations)."
+#| fig-height: 7
+fig, axes = plt.subplots(2, 1, figsize=(9, 7))
+for ax, ric in zip(axes, RICS):
+    b_all, v_all = ct.compute_vpin(trades, ric, EXAMPLE_DAY, n_buckets=50)
+    ct.plot_vpin(b_all, v_all, ric, EXAMPLE_DAY, ax, label="bucket imbalance", color="tab:blue", verbose=False)
+    _ = ax.axhline(vpin_base[ric]["mean"], color="tab:red", linestyle=":", linewidth=1.2,
+               label=f"random-sign baseline = {vpin_base[ric]['mean']:.3f}")
+    _ = ax.legend(fontsize=7)
+fig.tight_layout()
+plt.show()
+```
+
+```{python}
+#| include: false
+def vp(x, ric):
+    return f"{x[ric]:.3f}"
+
+def vx(ric, key):
+    return vpin_attrs[ric][key]
+
+def vn(ric, key, digits=0):
+    v = round(float(vx(ric, key)), digits)        # digits < 0 rounds to tens, hundreds, ...
+    return f"{v:,.{max(digits, 0)}f}"
+
+def vb(ric, key, fmt="%.3f"):
+    return fmt % vpin_base[ric][key]
+
+def vbx(ric, key):
+    return f"{vpin_base_ex[ric][key]:.3f}"
+
+def vd(ric, key):
+    return f"{vpin_days[ric][key]:.3f}"
+```
+
+@fig-vpin shows one trading day (`{python} EXAMPLE_DAY_STR`) per stock, cut into 50 slices of equal traded volume rather than equal time. AGLJ.J traded `{python} vn("AGLJ.J", "day_volume")` shares in `{python} vn("AGLJ.J", "trades")` trades (median trade `{python} vn("AGLJ.J", "median_trade")` shares), giving buckets of about `{python} vn("AGLJ.J", "bucket_volume", -2)` shares; GRTJ.J traded `{python} vn("GRTJ.J", "day_volume")` shares in `{python} vn("GRTJ.J", "trades")` trades (median `{python} vn("GRTJ.J", "median_trade")` shares), giving buckets of about `{python} vn("GRTJ.J", "bucket_volume", -2)` shares. The x-axis is the bucket number, so it runs through the day in time order, but busy periods fill buckets quickly and quiet periods slowly, and bucket numbers do not map evenly onto clock time. The y-axis is each bucket's imbalance: 0 means buyer- and seller-initiated volume were equal, 1 that every share traded in the same direction, and 0.5 a 75/25 split. The dashed line is the day's VPIN, the average of the 50 bucket values; the comparison that matters is between it and the dotted random-sign level.
+
+```{python}
+#| label: tbl-vpin
+#| tbl-cap: "VPIN on the example day (all trades) against the random-sign baseline, and the daily VPIN over all sample days."
+#| output: asis
+show_table(pd.DataFrame([{
+    "Security": ric,
+    "Bucket size V (shares)": f"{vpin_attrs[ric]['bucket_volume']:,.0f}",
+    "Trades per bucket": f"{vpin_attrs[ric]['trades_per_bucket']:.0f}",
+    "Buckets filled by one print": vpin_attrs[ric]["single_print_buckets"],
+    "VPIN (example day)": vpin_mean[ric],
+    "Random-sign baseline": vpin_base[ric]["mean"],
+    "Baseline 95% range": f"{vpin_base[ric]['q025']:.3f}–{vpin_base[ric]['q975']:.3f}",
+    "VPIN / baseline": vpin_base[ric]["ratio"],
+    "Daily VPIN, all days (mean)": vpin_days[ric]["mean"],
+    "Daily range": f"{vpin_days[ric]['min']:.3f}–{vpin_days[ric]['max']:.3f}",
+} for ric in RICS]), floatfmt=".3f")
+```
+
+On the example day VPIN is `{python} vp(vpin_mean, "AGLJ.J")` for AGLJ.J and `{python} vp(vpin_mean, "GRTJ.J")` for GRTJ.J. Both lie well above what random trade signs would produce (@tbl-vpin): `{python} vb("AGLJ.J", "mean")` and `{python} vb("GRTJ.J", "mean")`, with the observed values outside the 95% range of the permutations. Order flow in both stocks is therefore genuinely persistent: buys tend to follow buys and sells follow sells, more than chance would allow.
+
+The higher raw VPIN of GRTJ.J, however, mostly reflects how its trading is organised rather than more one-sided flow. With about `{python} f"{vx("GRTJ.J", "trades_per_bucket"):.0f}"` trades per bucket against `{python} f"{vx("AGLJ.J", "trades_per_bucket"):.0f}"` for AGLJ.J, its baseline is much higher. Relative to their baselines the two stocks are similar (`{python} vb("AGLJ.J", "ratio", "%.2f")` and `{python} vb("GRTJ.J", "ratio", "%.2f")` times the random-sign level). Over all sample days, daily VPIN averages `{python} vd("AGLJ.J", "mean")` for AGLJ.J and `{python} vd("GRTJ.J", "mean")` for GRTJ.J, so the example day is typical.
+
+Only `{python} vx("AGLJ.J", "single_print_buckets")` of the 50 AGLJ.J buckets and `{python} vx("GRTJ.J", "single_print_buckets")` of the GRTJ.J buckets are filled by a single print on the example day, so these buckets do not drive the result. Excluding every print larger than one bucket (`{python} vx("AGLJ.J", "n")` trades and `{python} f"{100 * vx("AGLJ.J", "share"):.0f}%"` of the day's volume for AGLJ.J; `{python} vx("GRTJ.J", "n")` and `{python} f"{100 * vx("GRTJ.J", "share"):.0f}%"` for GRTJ.J) lowers VPIN to `{python} vp(vpin_excl, "AGLJ.J")` and `{python} vp(vpin_excl, "GRTJ.J")`, and both remain well above their correspondingly lower random-sign levels of `{python} vbx("AGLJ.J", "mean")` and `{python} vbx("GRTJ.J", "mean")`.
+
+**Connection to Hawkes processes.** A Hawkes process has intensity $\lambda(t) = \mu + \sum_{t_i<t}\phi(t-t_i)$, so past events raise the rate of future ones; its branching ratio $n=\int_0^\infty\phi(u)\,du$ measures how much activity is self-generated. VPIN is related but not the same. In a bivariate Hawkes model of buyer- and seller-initiated trades, order flow becomes one-sided, and VPIN rises above the random-sign baseline, when buys excite further buys (and sells further sells) more strongly than they excite trades of the opposite sign. The overall branching ratio describes how clustered trading activity is, regardless of direction, so a high branching ratio need not imply a high VPIN. The random-sign baseline used here corresponds to the case of no directional excitation.
+
+**Connection to limit-order posting.** Persistent one-sided flow is the risk a market maker faces when quoting: if the buyers it keeps selling to are informed, it sells too cheaply and loses as the price adjusts. The optimal quote distance $\delta^*$ in the course's limit-order-posting model balances spread revenue against execution probability and inventory risk; its markup term (the $1/\kappa$ term) is purely mechanical and contains no adverse selection. When order flow is toxic, a liquidity provider should quote further from its reservation price, or post less size, than that markup implies. VPIN is a practical warning signal for this risk rather than a direct measure of informed trading. Here it is consistent with the realised-spread results: in AGLJ.J most of the effective spread is lost to price impact even though its VPIN is the lower of the two.
+
+## Expected Shortfall and the Square-Root Law
+
+This section tests whether the relationship between trade size and price impact in the data is consistent with the square-root law used in optimal-execution theory.
+
+**The square-root law.** The square-root law states that the price impact of a *metaorder*, a large parent order executed through many child trades, grows with the square root of its size relative to typical market volume [@toth2011anomalous]:
+$$
+\frac{\Delta p^*}{p} \propto \sigma \sqrt{\frac{Q}{V}},
+$$
+where $\Delta p^*/p$ is the relative price impact, $\sigma$ the volatility over the execution horizon, $Q$ the size of the order and $V$ the typical volume over the same horizon (usually daily volume). The key feature is the exponent $1/2$: with volatility and volume held fixed, doubling the order size raises the expected impact by a factor of $\sqrt{2} \approx 1.41$, not 2, and quadrupling it doubles the impact. On log–log axes the law is a straight line of slope 0.5.
+
+**Course connection: optimal execution.** In the Almgren–Chriss framework [@almgren2001optimal] an investor who must execute $X$ shares by time $T$ balances two costs: market impact, which punishes trading too fast, and timing risk, which punishes trading too slowly because the unexecuted position is exposed to price moves. The investor chooses the trajectory $x(t)$ of remaining holdings to solve
+$$
+\min_{x} \; \mathbb{E}[C(x)] + \lambda \operatorname{Var}[C(x)],
+$$
+where $C(x)$ is the execution cost and $\lambda$ is risk aversion. With linear temporary impact of coefficient $\eta$, the solution is $x(t) = X \sinh(\kappa(T-t)) / \sinh(\kappa T)$, with
+$$
+\kappa = \sqrt{\frac{\lambda \sigma^2}{\eta}}.
+$$
+A larger $\kappa$ (more risk-averse, a more volatile stock, or cheaper impact) front-loads the schedule; as $\lambda \to 0$, $\kappa \to 0$ and the trajectory becomes the straight line of TWAP, trading evenly over time. The discrete-time version is solved by the same Bellman recursion as @bertsimas1998optimal, where each step weighs the current trade's cost against its effect on future prices. Because $\sigma$ enters $\kappa$, the time-varying volatility of Part II changes the optimal pace through the day, as discussed under order-book resilience. The impact function matters too. The basic model assumes impact linear in trading speed, whereas the square-root law says the total impact of a metaorder is concave in its size; nonlinear extensions of Almgren–Chriss replace $\eta v$ with a power $\eta v^{\beta}$ to accommodate this. The exponent $1/2$ does not follow from every execution model: it is an empirical scaling law, and its theoretical justification depends on the impact model assumed.
+
+**What was done.** Each trade's cost, as a fraction of the mid-price, is split into two parts:
+$$
+C_i^{\text{direct}} = \frac{QS_i}{2} = \frac{a_i - b_i}{2m_i}, \qquad
+C_i^{\text{indirect}} = \frac{D_i\,(m_{i+\Delta} - m_i)}{m_i}, \quad \Delta = 60\text{ s}.
+$$
+The direct cost is the half-spread paid to execute immediately against the best quote. The indirect cost is the adverse move in the mid-price over the following 60 seconds, signed so that a move against the trader is positive; it is half the price impact of Part III's spread decomposition. The trades are divided into 20 equally populated size bins, the costs are averaged within each bin, and a power law $C^{\text{indirect}}(Q) = aQ^{\alpha}$ is fitted by least squares on log–log axes, $\log C^{\text{indirect}} = \log a + \alpha \log Q$. The fitted exponent $\alpha$ is compared with 0.5: $\alpha \approx 0.5$ is consistent with square-root scaling, $\alpha < 0.5$ means impact grows more slowly than the benchmark, and $\alpha > 0.5$ more quickly.
+
+The indirect cost is measured from the later mid-price rather than as the effective spread less half the quoted spread. That residual, $ES_i/2 - QS_i/2$, measures the price improvement a trade received relative to the quote, not its impact; in this sample it is slightly negative on average, because most trades execute at or inside the touch, and negative values cannot be fitted on a log scale.
+
+```{python}
+#| label: fig-sqrt-law
+#| fig-cap: "Direct cost (half quoted spread), indirect cost (adverse mid-price move 60 seconds after the trade) and total cost by trade-size bin (20 equally populated bins), with the fitted impact slope and the square-root-law reference slope of 0.5. All trades on all 21 trading days in the sample (2 September – 1 October 2013)."
+#| fig-height: 9
+sqrt_law_fits = {}
+fig, axes = plt.subplots(2, 1, figsize=(8, 9))
+for ax, ric in zip(axes, RICS):
+    grp = ct.compute_expected_shortfall(tx_spreads[ric])
+    _ = ct.plot_expected_shortfall_and_sqrt_law(grp, ric, ax)
+    sqrt_law_fits[ric] = grp.attrs["fit"]
+    sqrt_law_fits[ric].update(
+        vol_lo=float(grp["volume"].iloc[0]), vol_hi=float(grp["volume"].iloc[-1]),
+        ind_lo_bps=float(grp["indirect"].iloc[0] * 1e4), ind_hi_bps=float(grp["indirect"].iloc[-1] * 1e4),
+        direct_bps=float(grp["direct"].mean() * 1e4),
+        price_improvement_bps=float(((tx_spreads[ric]["effective_spread"] - tx_spreads[ric]["quoted_spread"]) / 2).mean() * 1e4))
+fig.tight_layout()
+plt.show()
+```
+
+```{python}
+#| include: false
+def sq(ric, key, d=2):
+    x = sqrt_law_fits[ric][key]
+    return str(x) if key in ("n_bins_used", "n_bins") else f"{x:.{d}f}"
+
+def sq_vol(ric, key):
+    return f"{round(sqrt_law_fits[ric][key]):,}"
+
+def sq_dbl(ric):
+    return f"{2 ** sqrt_law_fits[ric]['slope']:.2f}"
+```
+
+The direct cost is essentially flat in trade size, at about `{python} sq("AGLJ.J", "direct_bps", 1)` bps for AGLJ.J and `{python} sq("GRTJ.J", "direct_bps", 1)` bps for GRTJ.J, because almost every trade executes at or inside the touch whatever its size. The indirect cost rises with size, but slowly. The fitted exponent is `{python} sq("AGLJ.J", "slope")` for AGLJ.J ($R^2$ = `{python} sq("AGLJ.J", "r2")`, `{python} sq("AGLJ.J", "n_bins_used")` of `{python} sq("AGLJ.J", "n_bins")` bins with positive average impact) and `{python} sq("GRTJ.J", "slope")` for GRTJ.J ($R^2$ = `{python} sq("GRTJ.J", "r2")`, `{python} sq("GRTJ.J", "n_bins_used")` of `{python} sq("GRTJ.J", "n_bins")` bins). Doubling the trade size therefore raises the indirect cost by a factor of only `{python} sq_dbl("AGLJ.J")` for AGLJ.J and `{python} sq_dbl("GRTJ.J")` for GRTJ.J, against 1.41 under the square-root law. Across the whole size range, from about `{python} sq_vol("AGLJ.J", "vol_lo")` to `{python} sq_vol("AGLJ.J", "vol_hi")` shares in the smallest and largest AGLJ.J bins, the indirect cost moves only from `{python} sq("AGLJ.J", "ind_lo_bps", 1)` to `{python} sq("AGLJ.J", "ind_hi_bps", 1)` bps; for GRTJ.J it moves from `{python} sq("GRTJ.J", "ind_lo_bps", 1)` to `{python} sq("GRTJ.J", "ind_hi_bps", 1)` bps. Both exponents are far below 0.5. For comparison, the residual $ES/2 - QS/2$ averages `{python} sq("AGLJ.J", "price_improvement_bps")` bps for AGLJ.J and `{python} sq("GRTJ.J", "price_improvement_bps")` bps for GRTJ.J.
+
+A slope well below 0.5 does not contradict the square-root law. The law describes metaorders, whereas each point here is an individual trade, and single-trade impact is known to be far more concave, with exponents typically in the 0.1–0.3 range [@lillo2003master]. Large traders split their orders, so the largest single prints are not the largest decisions, and a trade's own size says little about the size of the parent order it belongs to. A direct test would require reconstructing metaorders, which the anonymous TAQ data do not identify. The fit also has limits of its own: the bins are averages over thousands of noisy trades, the 60-second horizon mixes a trade's own impact with the impact of the trades that follow it (order flow is persistent, as the VPIN results showed), and a good fit near 0.5 would only show consistency with the benchmark, not prove the law or the assumptions of an execution model. For execution, the practical reading is that splitting an order into child trades of ordinary size costs little extra per share, so the cost of a large order is governed mainly by how its child trades are spaced in time and how fast the book replenishes between them, which is the resilience question of Part II.
+
+## Summary of Part II
+
+```{python}
+#| include: false
+from jsemicro.reporting import recall
+_sf = recall().get("sf_stats", {})
+sf_k = lambda key, stat: _sf[key][stat]
+```
+
+Across the three chapters of this part the contrast between the two securities is consistently one of liquidity. GRTJ.J trades less often and with a tick that is large relative to its price. Its relative trading cost is about twice AGLJ.J's (effective spread of `{python} sp("GRTJ.J", "effective_bps", 1)` against `{python} sp("AGLJ.J", "effective_bps", 1)` bps), a larger share of that cost is realised spread, and its raw VPIN is higher, although mainly because each volume bucket contains fewer, larger trades; relative to a random-sign baseline both stocks show similarly persistent order flow. This matches the order-flow persistence and adverse-selection findings of Part I (@sec-orderflow). Both names show the expected intraday pattern: volatility and spreads are highest after the open, volatility rises again into the close, and volume builds through the afternoon. Price impact of individual trades is strongly concave, with exponents well below the square-root benchmark for metaorders. High-frequency returns are fat-tailed in both names: the excess kurtosis of AGLJ.J's VWAP returns is `{python} f"{sf_k('AGLJ.J|VWAP', 'exkurt'):.0f}"`, and the Hill tail indices lie between `{python} f"{min(v['alpha_right'] for v in _sf.values()):.1f}"` and `{python} f"{max(v['alpha_right'] for v in _sf.values()):.1f}"`. Returns of point-in-time last-trade prices are negatively autocorrelated at lag 1, the signature of bid–ask bounce (@sec-bars). The price response to a single trade barely depends on its size (@sec-impact). Displayed depth recovers slowly after large market orders in both names, and most slowly at the close, so an execution schedule should trade most heavily at midday, cautiously at the open, and passively rather than with book-sweeping orders near the close.
+
+A data correction underlies all of these results: the timestamps in the first version of the Part I pipeline were two hours early, which removed the first two hours of each session and kept post-close prints. With the corrected timestamps, the late-session liquidity "deterioration" seen in earlier drafts disappears; it was an artefact of the closing auction and after-hours reports.
+
+```{python}
+#| include: false
+from jsemicro.reporting import record
+record(spread_stats={r: {k: float(v) for k, v in d.items() if isinstance(v, (int, float, np.floating))}
+                     for r, d in spread_stats.items()},
+       sqrt_law={r: {k: float(v) for k, v in d.items() if isinstance(v, (int, float, np.floating))}
+                 for r, d in sqrt_law_fits.items()},
+       vpin_mean={r: float(v) for r, v in vpin_mean.items()})
+```

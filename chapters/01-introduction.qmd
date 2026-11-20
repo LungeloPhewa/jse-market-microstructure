@@ -1,0 +1,39 @@
+# Introduction {#sec-intro}
+
+## Why microstructure matters to a bank
+
+Every order a bank or asset manager sends to an exchange pays for liquidity. It pays the spread, it moves the price against itself, and it reveals information that other traders act on. Those costs are small per trade and large in aggregate. They decide whether an execution algorithm adds or destroys value, how a desk should schedule a large order through the day, what transaction-cost assumptions belong in a backtest, and how much liquidity risk sits in a position that may need to be sold quickly. Measuring them requires the finest data there is, every trade and every change of the order book, and the statistical tools to make sense of millions of events.
+
+This book is a complete study of that kind for two shares on the Johannesburg Stock Exchange over one month. It is organised the way such work is done in practice: first the data engineering, then the empirical measurement of liquidity and trading costs, then a stochastic model of the order flow itself.
+
+## The data
+
+| | Anglo American plc (AGLJ.J) | Growthpoint Properties Ltd (GRTJ.J) |
+|---|---|---|
+| Sector | Diversified mining | Real estate (REIT) |
+| Typical share price | about R250 | about R24 |
+| Tick size | 1 cent | 1 cent |
+| Character | large, liquid, internationally traded | large local REIT, less active |
+
+: The two securities. {#tbl-securities}
+
+The sample is the Refinitiv Tick History (TRTH) Transactions and Market Depth exports for both shares from 1 September to 1 October 2013: about 21 trading days, roughly 2.3 million transaction messages and 7.8 million ten-level book updates. Prices are in South African cents (ZAc) and times in South African Standard Time (SAST, UTC+2). The JSE trading day in 2013 ran as follows: a pre-open from 08:00, an opening call auction from 08:30, continuous trading from 09:00, a closing call auction from 16:50, and an uncross at about 17:00, followed by off-book trade reporting.
+
+The two shares have the same tick but prices that differ by a factor of ten. One cent is about 0.4 basis points of an AGLJ.J share and about 4 basis points of a GRTJ.J share. This difference in *relative* tick size explains much of what follows: GRTJ.J's spread is only a few ticks wide but costly in basis points, its queues are long and its book changes rarely. AGLJ.J's spread spans many more ticks, and its book changes constantly.
+
+## Structure of the book
+
+**Part I: engineering a tick-data pipeline (@sec-pipeline, @sec-orderflow).** The pipeline goes from the vendor's long-format FID export to a clean, signed, time-ordered event table. It uses streaming and chunked processing, a schema-stable pivot, an external merge sort, and trade classification by the Lee–Ready rule. On top of the table come the stylised facts of order flow: persistent trade signs, heavy-tailed and clustered waiting times, and costs that rise with trade size.
+
+**Part II: microstructure and the cost of trading (@sec-bars, @sec-impact, @sec-costs).** This part covers bar construction, the statistical properties of returns at high frequency, the price impact of trades as a function of size, intraday seasonality, how quickly the book refills after large orders, and the cost of trading: effective, quoted and realised spreads, adverse selection, VPIN and the square-root law of market impact.
+
+**Part III: order flow as a Hawkes process (@sec-events, @sec-hawkes).** The exchange's own market-state markers separate continuous trading from auctions and off-book trades. Ten order event types are inferred from the trades and the book. A ten-variate self-exciting point process is then calibrated for each stock and day by maximum likelihood, and its excitation structure is read from bubble plots.
+
+**Reproducibility (@sec-repro).** All of this is built so that it can be rerun from a clean machine with one command, including by readers who cannot obtain the licensed data, through a synthetic market that writes exports in the vendor's format (@sec-synthetic).
+
+## Origin of the material
+
+The three parts grew out of three assignments in a course on high-frequency trading and market microstructure at the University of Cape Town. Each later assignment corrected and extended the earlier ones. For publication they have been consolidated into one Python package, one pipeline and one book. In the process, two errors in the original code were found and fixed. Both are documented where they matter:
+
+1. **A two-hour timestamp shift in Part I.** The raw `Date[G]`/`Time[G]` fields are GMT, but the original flattening code treated them as local time. The error was found and fixed during Part II; here the corrected code is used throughout (@sec-raw).
+2. **A time-unit error in Part III.** Under pandas 3, timestamps are stored in microseconds, and converting them with `astype("int64")` while assuming nanoseconds widened the 10 ms market-order window to 10 s and the 500 ms trade-matching window to 500 s. The correction changes the event counts and the fitted excitation effects, which are reported here after the fix (@sec-events).

@@ -1,0 +1,26 @@
+```{python}
+#| include: false
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import matplotlib.ticker as mticker
+
+from jsemicro.config import PATHS, RICS
+from jsemicro.microstructure.book import SAST, tidy_time_axis, show_table, sast_minutes, hhmm, load_part2
+from jsemicro.microstructure import data_io
+from jsemicro.microstructure import bar_construction as bc
+from jsemicro.microstructure import stylised_facts as sf
+from jsemicro.microstructure import price_impact as pi
+from jsemicro.microstructure import intraday_seasonality as ises
+from jsemicro.microstructure import order_book_resilience as obr
+from jsemicro.microstructure import cost_of_trading as ct
+
+TX_PATH, MD_PATH = PATHS.tx_trimmed, PATHS.md_flat
+globals().update(load_part2())          # md, trades, sign_report, EXAMPLE_DAY, ...
+n_trades, n_quotes = int(len(trades)), int(len(md))
+n_trade_days, n_quote_days = int(trades["date"].nunique()), int(md["date"].nunique())
+n_overlap_days = len(overlap_days)
+```
+
+{{< include _synthetic-banner.qmd >}}

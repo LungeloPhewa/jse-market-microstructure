@@ -1,0 +1,59 @@
+# Conclusion {#sec-conclusion}
+
+```{python}
+#| include: false
+import pandas as pd
+from jsemicro.reporting import recall
+R = recall()
+sp, sq, rho = R["spread_stats"], R["sqrt_law"], R["hawkes_rho_days"]
+```
+
+{{< include _synthetic-banner.qmd >}}
+
+## Results at a glance
+
+```{python}
+#| label: tbl-summary
+#| tbl-cap: "Headline results, all computed in the preceding chapters."
+#| output: asis
+rows = [
+    ("Lag-1 autocorrelation of trade signs", "@sec-orderflow", R["sign_acf1"], "{:.2f}"),
+    ("Power-law tail index of trade waiting times", "@sec-orderflow", R["tau_alpha"], "{:.2f}"),
+    ("Effective spread (bps)", "@sec-costs", {r: v["effective_bps"] for r, v in sp.items()}, "{:.1f}"),
+    ("  of which price impact after 60 s (bps)", "@sec-costs", {r: v["impact_bps"] for r, v in sp.items()}, "{:.1f}"),
+    ("  of which realised spread (bps)", "@sec-costs", {r: v["realised_bps"] for r, v in sp.items()}, "{:.1f}"),
+    ("VPIN, example day", "@sec-costs", R["vpin_mean"], "{:.2f}"),
+    ("Size exponent of indirect cost (square-root law: 0.5)", "@sec-costs", {r: v["slope"] for r, v in sq.items()}, "{:.2f}"),
+    ("Order-book events per day (Part III)", "@sec-events", R["events_per_day"], "{:,.0f}"),
+    ("Hawkes spectral radius, median over days", "@sec-hawkes", {r: v[1] for r, v in rho.items()}, "{:.2f}"),
+    ("Buy MO → aggressive ask LO: branching ratio", "@sec-hawkes", R["hawkes_effects"]["buy_mo_to_agg_ask_lo"], "{:.2f}"),
+    ("  half-life (ms)", "@sec-hawkes", {r: 1000 * v for r, v in R["hawkes_effects"]["half_life_buy_mo_to_agg_ask_lo"].items()}, "{:.0f}"),
+]
+tab = pd.DataFrame([{"Quantity": q, "AGLJ.J": f.format(v["AGLJ.J"]), "GRTJ.J": f.format(v["GRTJ.J"]), "See": s}
+                    for q, s, v, f in rows])
+print(tab.to_markdown(index=False))
+```
+
+## What the three parts add up to
+
+**Liquidity is set by the relative tick.** The two shares trade on the same exchange with the same one-cent tick, but one cent is about ten times larger, relative to the price, for Growthpoint than for Anglo American. Almost every contrast in this book follows from that:
+
+* GRTJ.J's spread is only a few ticks wide, a large distance in basis points, and its queues are long;
+* its book changes about `{python} f"{R['events_per_day']['AGLJ.J'] / R['events_per_day']['GRTJ.J']:.0f}"` times less often;
+* trading it costs about twice as much in basis points;
+* a larger share of that cost is compensation for supplying liquidity (realised spread) rather than loss to informed traders.
+
+**Cost depends on when you trade more than on how much.** At the level of single prints, price impact barely depends on size. Its exponent of `{python} f"{sq['AGLJ.J']['slope']:.2f}"`–`{python} f"{sq['GRTJ.J']['slope']:.2f}"` is far below the square-root law, because large orders are split into small pieces. Volatility and spreads, in contrast, are much higher after the open than at midday, and displayed depth refills slowly after large orders. For execution this means front-loading less, trading most heavily at midday, and working orders passively into the close.
+
+**Order flow is mostly endogenous.** Trade signs are persistent over more than a hundred trades and waiting times are heavy-tailed and clustered. A Hawkes model explains this as self-excitation: its branching matrix has a spectral radius of about `{python} f"{rho['AGLJ.J'][1]:.2f}"`, so most events are reactions to earlier events. The bubble plots show which reactions dominate. Quotes at the best prices are withdrawn within milliseconds of a market order and replenished within a fraction of a second. In AGLJ.J, market orders also set off a repricing of the whole ten-level ladder. The model's failure to pass residual tests is informative in itself: a constant baseline and a single exponential time scale are not enough for a full trading day.
+
+## Lessons from the process
+
+Two errors were found while consolidating this work: a two-hour timestamp shift in the original ingestion, and a timestamp-unit error under pandas 3 that widened two critical time windows a thousandfold. Neither produced an error message. Both produced plausible numbers. They were caught by cross-checks between independent data sources and, above all, by running the whole pipeline on synthetic data with known answers. This is the strongest argument for the reproducibility apparatus of @sec-repro: synthetic data, tests and a pipeline that can be rerun with one command make wrong results *findable*.
+
+## Extensions
+
+* **Time-varying baselines and multi-scale kernels** for the Hawkes model, e.g. a piecewise-constant intraday $\mu(t)$ and sums of exponentials or power-law kernels, to address the residual misfit.
+* **Metaorder reconstruction** with broker identifiers, where available, for a proper test of the square-root law.
+* **More securities and periods**, including the fee changes studied by @harvey2017deviations, to separate stock-specific from market-wide effects.
+* **An execution-cost model** with intraday seasonal parameters and resilience, calibrated from Part II and backtested against the simple schedule.

@@ -1,0 +1,4 @@
+/* Wide matplotlib figures: always scale to the text column. */
+.cell-output-display img, img.figure-img { max-width: 100%; height: auto; }
+/* Wide tables scroll instead of overflowing. */
+.cell-output-display table { display: block; overflow-x: auto; }

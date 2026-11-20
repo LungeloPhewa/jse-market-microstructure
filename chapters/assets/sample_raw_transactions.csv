@@ -1,0 +1,19 @@
+#RIC,Date[G],Time[G],GMT Offset,Type,MSG/FID Number,Message Type,FID Name,FID Value,FID Enum String,PE Code,Sequence Number,Source RIC,Number of FIDs
+AGLJ.J,02-SEP-2013,07:00:09.236,+2,Raw-TAS,,UPDATE_PC,,,,,,,4
+,,,,FID,,,MID_PRICE,24502.0,,,,,
+,,,,FID,,,ASK,24509,,,,,
+,,,,FID,,,ASKSIZE,137,,,,,
+,,,,FID,,,SEQNUM,37,,,,,
+AGLJ.J,02-SEP-2013,07:00:09.366,+2,Raw-TAS,,UPDATE_PC,,,,,,,4
+,,,,FID,,,MID_PRICE,24500.0,,,,,
+,,,,FID,,,ASK,24505,,,,,
+,,,,FID,,,ASKSIZE,250,,,,,
+,,,,FID,,,SEQNUM,40,,,,,
+AGLJ.J,02-SEP-2013,07:00:10.187,+2,Raw-TAS,,UPDATE_PC,,,,,,,5
+,,,,FID,,,TRDPRC_1,24505,,,,,
+,,,,FID,,,TRDVOL_1,156,,,,,
+,,,,FID,,,ACVOL_1,6407,,,,,
+,,,,FID,,,PRCTCK_1,2,,,,,
+,,,,FID,,,SEQNUM,43,,,,,
+AGLJ.J,02-SEP-2013,07:00:10.187,+2,Raw-TAS,,UPDATE_PC,,,,,,,4
+,,,,FID,,,MID_PRICE,24500.0,,,,,

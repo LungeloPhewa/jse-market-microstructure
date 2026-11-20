@@ -1,0 +1,20 @@
+# Authorship and use of AI tools {#sec-ai}
+
+## Authorship
+
+The analysis, code and written interpretation in Parts I–III were produced by the author as three assignments for a postgraduate course on High Frequency Trading and Market Microstructure at the University of Cape Town (2026). The course, the reference papers and the data were provided by the lecturer. The licensed data were used under the University's Refinitiv (LSEG) licence for academic purposes.
+
+## Use of generative AI
+
+AI assistance was used to articulate statements well, help debugging any mistakes in the codes and also checking consistencies in the work done in assignements with already developed studies
+
+A generative AI assistant (Claude, by Anthropic) was used to consolidate the three assignments into this repository. It was used to:
+
+* restructure the scripts into one Python package and replace hard-coded paths with a configuration module;
+* port the Quarto reports from the knitr/reticulate engine to the Jupyter engine;
+* write the Snakemake pipeline, Dockerfile, Makefile, continuous-integration workflow and unit tests;
+* write the synthetic-market generator (Appendix @sec-synthetic) and the Part I order-flow module, whose original was missing from the submission bundle;
+* draft the introductory, reproducibility and concluding chapters;
+* find and fix the time-unit error in the Part III event identification.
+
+The author reviewed and reran the code, and checked the results and the text. The author takes responsibility for all content.
