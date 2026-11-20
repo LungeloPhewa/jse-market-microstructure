@@ -1,0 +1,100 @@
+# Snakemake pipeline: raw exports -> cleaned data -> cached results for the book.
+#
+#   snakemake -s workflow/Snakefile --cores 1                  # real data (data/real)
+#   JSEMICRO_DATA=synthetic snakemake -s workflow/Snakefile --cores 1
+#
+# Each rule calls one command of `python -m jsemicro` (src/jsemicro/__main__.py),
+# which in turn calls the documented functions of the package. Snakemake only
+# reruns a rule when its inputs, its code or its parameters changed.
+
+import os
+from pathlib import Path
+
+MODE = os.environ.get("JSEMICRO_DATA", "real")
+ROOT = Path(workflow.basedir).parent
+D = ROOT / "data" / MODE if MODE in ("real", "synthetic") else Path(MODE)
+RAW, CLEAN, OUT = D / "raw", D / "clean", D / "out"
+SRC = ROOT / "src" / "jsemicro"
+PY = "python -m jsemicro"
+
+
+def raw(pattern):
+    hits = sorted(RAW.glob(pattern))
+    return str(hits[0]) if hits else str(RAW / pattern.replace("*", "X"))
+
+
+rule all:
+    input:
+        CLEAN / "AGL_GRT_stage4_final.parquet",
+        OUT / "daily_auction_prices.csv",
+        OUT / "hawkes" / "DONE",
+
+
+if MODE == "synthetic":
+    rule synthetic_exports:
+        """Simulate the limit order books and write raw exports in the Refinitiv format."""
+        input: list((SRC / "synthetic").glob("*.py"))
+        output:
+            RAW / "JSE-AGL-GRT-Transactions-Raw-SYNTHETIC.csv.gz",
+            RAW / "JSE-AGL-GRT-MarketDepth-SYNTHETIC.csv.gz",
+        shell: f"{PY} synth"
+
+
+rule flatten:
+    """Header + FID rows -> one row per event (two passes, fixed schema)."""
+    input: (RAW / "JSE-AGL-GRT-Transactions-Raw-SYNTHETIC.csv.gz") if MODE == "synthetic" else raw("*Transactions*.gz"),
+           SRC / "ingest" / "flatten_taq.py"
+    output: CLEAN / "AGL_GRT_TX_flat.csv"
+    shell: f"{PY} flatten"
+
+
+rule trim:
+    """Keep the ~20 transaction columns the analysis uses."""
+    input: CLEAN / "AGL_GRT_TX_flat.csv", SRC / "ingest" / "trim_tx_columns.py"
+    output: CLEAN / "AGL_GRT_TX_trimmed.csv"
+    shell: f"{PY} trim"
+
+
+rule depth:
+    """Wide Market Depth export -> typed Parquet (L1-L10)."""
+    input: (RAW / "JSE-AGL-GRT-MarketDepth-SYNTHETIC.csv.gz") if MODE == "synthetic" else raw("*MarketDepth*.gz"),
+           SRC / "ingest" / "market_depth_prepare.py"
+    output: CLEAN / "AGL_GRT_MD_flat.parquet"
+    shell: f"{PY} depth"
+
+
+rule auctions:
+    """Daily opening and closing auction (uncross) prices."""
+    input: CLEAN / "AGL_GRT_TX_flat.csv", SRC / "ingest" / "auction_prices.py"
+    output: OUT / "daily_auction_prices.csv"
+    shell: f"{PY} auctions"
+
+
+rule merge:
+    """Part I: both feeds in one event-time table with a common schema."""
+    input: CLEAN / "AGL_GRT_TX_trimmed.csv", CLEAN / "AGL_GRT_MD_flat.parquet", SRC / "pipeline" / "merge_tx_md.py"
+    output: CLEAN / "AGL_GRT_merged.parquet"
+    shell: f"{PY} merge"
+
+
+rule external_sort:
+    """Part I: external merge sort (sorted chunks + k-way heap merge), verified."""
+    input: CLEAN / "AGL_GRT_merged.parquet",
+           SRC / "pipeline" / "taq_stage2_ordering_and_cleaning.py", SRC / "pipeline" / "taq_stage3_merge.py"
+    output: CLEAN / "AGL_GRT_merged_sorted.parquet"
+    shell: f"{PY} sort"
+
+
+rule clean_classify:
+    """Part I: clean, compact same-timestamp events, Lee-Ready classification."""
+    input: CLEAN / "AGL_GRT_merged_sorted.parquet", SRC / "pipeline" / "stage4_clean_classify.py"
+    output: CLEAN / "AGL_GRT_stage4_final.parquet"
+    shell: f"{PY} stage4"
+
+
+rule hawkes:
+    """Part III: Step 0, event identification, one Hawkes fit per security-day."""
+    input: CLEAN / "AGL_GRT_TX_trimmed.csv", CLEAN / "AGL_GRT_MD_flat.parquet",
+           list((SRC / "hawkes").glob("*.py"))
+    output: OUT / "hawkes" / "DONE"
+    shell: f"rm -rf {OUT / 'hawkes'} && {PY} hawkes"
