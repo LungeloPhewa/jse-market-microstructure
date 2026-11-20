@@ -1,0 +1,70 @@
+# On every push to main:
+#   1. build the Docker image (cached),
+#   2. run the unit tests,
+#   3. reproduce the whole pipeline on SYNTHETIC data and render that book
+#      (proves the code runs end to end on a clean machine, without the
+#      licensed data),
+#   4. render the REAL-data book from the committed _freeze/ results,
+#   5. publish both to GitHub Pages: real book at /, synthetic build at /synthetic/.
+name: build-and-publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: jse-microstructure:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Unit tests
+        run: docker run --rm -v "$PWD":/project jse-microstructure:ci make test
+
+      - name: Synthetic data -> pipeline -> book (no freeze)
+        run: docker run --rm -v "$PWD":/project jse-microstructure:ci make pipeline-synthetic render-synthetic
+
+      - name: Real-data book from committed _freeze/
+        run: docker run --rm -v "$PWD":/project jse-microstructure:ci make render
+
+      - name: Assemble site
+        run: |
+          sudo chown -R "$USER" _book _book_synthetic
+          mkdir -p _book/synthetic
+          cp -r _book_synthetic/. _book/synthetic/
+          touch _book/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _book
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
